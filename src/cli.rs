@@ -12,6 +12,9 @@ pub struct LaunchCli {
     pub username: String,
     pub memory_mb: u32,
     pub isolate: bool,
+    pub mirror: Option<String>,
+    pub maven: Option<String>,
+    pub java: Option<String>,
 }
 
 pub struct DownloadCli {
@@ -19,12 +22,13 @@ pub struct DownloadCli {
     pub version: String,
     pub name: Option<String>,
     pub mirror: Option<String>,
+    pub maven: Option<String>,
 }
 
 const USAGE: &str = concat!(
     "usage:\n",
-    "  launch: lyys_mc_launcher launch --dir <game_dir> --name <instance> --username <name> [--memory <MB>] [--isolate]\n",
-    "  download: lyys_mc_launcher download --dir <game_dir> --version <version> [--name <instance>] [--mirror <url>]",
+    "  launch: lyys_mc_launcher launch --dir <game_dir> --name <instance> --username <name> [--memory <MB>] [--isolate] [--mirror <url>] [--maven <url>] [--java <path>]\n",
+    "  download: lyys_mc_launcher download --dir <game_dir> --version <version> [--name <instance>] [--mirror <url>] [--maven <url>]",
 );
 
 pub fn parse() -> Command {
@@ -46,6 +50,9 @@ fn parse_launch(rest: &[String]) -> LaunchCli {
     let mut instance: Option<String> = None;
     let mut username: Option<String> = None;
     let mut memory_mb = 4096;
+    let mut mirror: Option<String> = None;
+    let mut maven: Option<String> = None;
+    let mut java: Option<String> = None;
 
     for w in rest.windows(2) {
         match w[0].as_str() {
@@ -53,6 +60,9 @@ fn parse_launch(rest: &[String]) -> LaunchCli {
             "--name" => instance = Some(w[1].clone()),
             "--username" => username = Some(w[1].clone()),
             "--memory" => memory_mb = w[1].parse().unwrap_or(memory_mb),
+            "--mirror" => mirror = Some(w[1].clone()),
+            "--maven" => maven = Some(w[1].clone()),
+            "--java" => java = Some(w[1].clone()),
             _ => {}
         }
     }
@@ -83,6 +93,9 @@ fn parse_launch(rest: &[String]) -> LaunchCli {
         username: username.unwrap(),
         memory_mb,
         isolate,
+        mirror,
+        maven,
+        java,
     }
 }
 
@@ -91,6 +104,7 @@ fn parse_download(rest: &[String]) -> DownloadCli {
     let mut version: Option<String> = None;
     let mut name: Option<String> = None;
     let mut mirror: Option<String> = None;
+    let mut maven: Option<String> = None;
 
     for w in rest.windows(2) {
         match w[0].as_str() {
@@ -98,6 +112,7 @@ fn parse_download(rest: &[String]) -> DownloadCli {
             "--version" => version = Some(w[1].clone()),
             "--name" => name = Some(w[1].clone()),
             "--mirror" => mirror = Some(w[1].clone()),
+            "--maven" => maven = Some(w[1].clone()),
             _ => {}
         }
     }
@@ -114,6 +129,7 @@ fn parse_download(rest: &[String]) -> DownloadCli {
         version,
         name,
         mirror,
+        maven,
     }
 }
 

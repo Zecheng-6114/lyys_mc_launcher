@@ -27,6 +27,12 @@ pub fn build_args(mc_dir: &str, version: &Value, opts: &LaunchOptions) -> Vec<St
         ("${launcher_name}", env!("CARGO_PKG_NAME").into()),
         ("${launcher_version}", env!("CARGO_PKG_VERSION").into()),
         ("${classpath}", classpath_of(mc_dir, version, id)),
+        ("${classpath_separator}", path_separator().to_string()),
+        ("${library_directory}", format!("{mc_dir}/libraries")),
+        ("${user_type}", "legacy".into()),
+        ("${user_properties}", "{}".into()),
+        ("${resolution_width}", "854".into()),
+        ("${resolution_height}", "480".into()),
     ];
 
     let mut args = vec![format!("-Xmx{}m", opts.memory_mb)];
@@ -64,16 +70,66 @@ pub fn needed_libraries(version: &Value) -> Vec<&Value> {
     }).collect()
 }
 
+pub struct LibraryFile {
+    pub path: String,
+    pub url: String,
+    pub size: Option<u64>,
+}
+
+pub fn library_file(lib: &Value) -> Option<LibraryFile> {
+    if let Some(path) = lib["downloads"]["artifact"]["path"].as_str() {
+        return Some(LibraryFile {
+            path: path.to_string(),
+            url: lib["downloads"]["artifact"]["url"].as_str()?.to_string(),
+            size: lib["downloads"]["artifact"]["size"].as_u64(),
+        });
+    }
+
+    let name = lib["name"].as_str()?;
+    let mut parts = name.split(':');
+    let group = parts.next()?;
+    let artifact = parts.next()?;
+    let version = parts.next()?;
+    let path = format!(
+        "{}/{artifact}/{version}/{artifact}-{version}.jar",
+        group.replace('.', "/")
+    );
+    let base = lib["url"].as_str().unwrap_or("https://libraries.minecraft.net/");
+    let base = if base.ends_with('/') {
+        base.to_string()
+    } else {
+        format!("{base}/")
+    };
+    let url = format!("{base}{path}");
+
+    Some(LibraryFile {
+        path,
+        url,
+        size: None,
+    })
+}
+
 fn classpath_of(mc_dir: &str, version: &Value, id: &str) -> String {
     let mut parts = vec![format!("{mc_dir}/versions/{id}/{id}.jar")];
 
     for lib in needed_libraries(version) {
-        if let Some(path) = lib["downloads"]["artifact"]["path"].as_str() {
-            parts.push(format!("{mc_dir}/libraries/{path}"));
+        if let Some(file) = library_file(lib) {
+            parts.push(format!("{mc_dir}/libraries/{}", file.path));
         }
     }
 
-    parts.join(if cfg!(windows) { ";" } else { ":" })
+    let mut seen = std::collections::HashSet::new();
+    parts.retain(|path| seen.insert(path.clone()));
+
+    parts.join(path_separator())
+}
+
+fn path_separator() -> &'static str {
+    if cfg!(windows) {
+        ";"
+    } else {
+        ":"
+    }
 }
 
 fn fill(template: &str, vars: &[(&str, String)]) -> String {

@@ -16,8 +16,12 @@ fn main() {
 }
 
 fn run_download(c: &DownloadCli) {
+    let origins = download::Origins {
+        mojang: c.mirror.as_deref(),
+        maven: c.maven.as_deref(),
+    };
     let instance = c.name.clone().unwrap_or_else(|| c.version.clone());
-    match download::download_instance(&c.mc_dir, &instance, &c.version, c.mirror.as_deref()) {
+    match download::download_instance(&c.mc_dir, &instance, &c.version, &origins) {
         Ok(()) => println!("instance {instance} downloaded"),
         Err(e) => {
             eprintln!("failed to download instance: {e}");
@@ -37,11 +41,16 @@ fn run_launch(c: &LaunchCli) {
         }
     };
 
-    if let Err(e) = download::ensure_version_files(mc_dir, &version) {
+    let origins = download::Origins {
+        mojang: c.mirror.as_deref(),
+        maven: c.maven.as_deref(),
+    };
+
+    if let Err(e) = download::ensure_version_files(mc_dir, &version, &origins) {
         eprintln!("failed to complete files: {e}");
         return;
     }
-    if let Err(e) = download::ensure_assets(mc_dir, &version) {
+    if let Err(e) = download::ensure_assets(mc_dir, &version, &origins) {
         eprintln!("failed to complete assets: {e}");
         return;
     }
@@ -66,7 +75,9 @@ fn run_launch(c: &LaunchCli) {
 
     let args = build_args(mc_dir, &version, &opts);
 
-    std::process::Command::new("java")
+    let java = c.java.clone().unwrap_or_else(|| String::from("java"));
+
+    std::process::Command::new(java)
         .args(&args)
         .current_dir(&opts.game_dir)
         .status()
