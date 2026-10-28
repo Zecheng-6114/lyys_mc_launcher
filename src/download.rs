@@ -125,14 +125,18 @@ pub fn ensure_version_json(mc_dir: &str, id: &str, origins: &Origins) -> Result<
     serde_json::from_str(&text).map_err(|e| format!("failed to parse {}: {e}", path.display()))
 }
 
-pub fn ensure_version_files(mc_dir: &str, version: &Value, origins: &Origins) -> Result<(), String> {
-    let id = version["id"].as_str().unwrap();
+pub fn ensure_version_files(
+    mc_dir: &str,
+    version: &Value,
+    jar_id: &str,
+    origins: &Origins,
+) -> Result<(), String> {
     let client = &version["downloads"]["client"];
 
     let jar = Path::new(mc_dir)
         .join("versions")
-        .join(id)
-        .join(format!("{id}.jar"));
+        .join(jar_id)
+        .join(format!("{jar_id}.jar"));
     fetch(
         client["url"].as_str().unwrap(),
         &jar,
@@ -140,6 +144,10 @@ pub fn ensure_version_files(mc_dir: &str, version: &Value, origins: &Origins) ->
         origins,
     )?;
 
+    ensure_libraries(mc_dir, version, origins)
+}
+
+pub fn ensure_libraries(mc_dir: &str, version: &Value, origins: &Origins) -> Result<(), String> {
     for lib in needed_libraries(version) {
         let Some(file) = library_file(lib) else {
             continue;
@@ -151,7 +159,7 @@ pub fn ensure_version_files(mc_dir: &str, version: &Value, origins: &Origins) ->
     Ok(())
 }
 
-fn get_json(url: &str) -> Result<Value, String> {
+pub fn get_json(url: &str) -> Result<Value, String> {
     let resp = ureq::get(url)
         .call()
         .map_err(|e| format!("request failed {url}: {e}"))?;
@@ -165,19 +173,6 @@ fn get_json(url: &str) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("failed to parse {url}: {e}"))
 }
 
-pub fn load_version_json(mc_dir: &str, id: &str) -> Result<Value, String> {
-    let path = Path::new(mc_dir)
-        .join("versions")
-        .join(id)
-        .join(format!("{id}.json"));
-    let text = fs::read_to_string(&path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => format!(
-            "version {id} is not installed; run: lyys_mc_launcher download --dir <game_dir> --version {id}"
-        ),
-        _ => format!("failed to read {}: {e}", path.display()),
-    })?;
-    serde_json::from_str(&text).map_err(|e| format!("failed to parse {}: {e}", path.display()))
-}
 
 pub fn download_instance(
     mc_dir: &str,
@@ -195,7 +190,7 @@ pub fn download_instance(
     fs::write(dir.join(format!("{instance}.json")), text)
         .map_err(|e| format!("failed to write version.json: {e}"))?;
 
-    ensure_version_files(mc_dir, &version, origins)?;
+    ensure_version_files(mc_dir, &version, instance, origins)?;
     Ok(())
 }
 

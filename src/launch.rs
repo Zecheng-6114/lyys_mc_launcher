@@ -9,7 +9,7 @@ pub struct LaunchOptions {
     pub game_dir: String,
 }
 
-pub fn build_args(mc_dir: &str, version: &Value, opts: &LaunchOptions) -> Vec<String> {
+pub fn build_args(mc_dir: &str, version: &Value, jar_id: &str, opts: &LaunchOptions) -> Vec<String> {
     let id = version["id"].as_str().unwrap();
 
     let vars: Vec<(&str, String)> = vec![
@@ -26,7 +26,7 @@ pub fn build_args(mc_dir: &str, version: &Value, opts: &LaunchOptions) -> Vec<St
         ("${natives_directory}", format!("{mc_dir}/natives")),
         ("${launcher_name}", env!("CARGO_PKG_NAME").into()),
         ("${launcher_version}", env!("CARGO_PKG_VERSION").into()),
-        ("${classpath}", classpath_of(mc_dir, version, id)),
+        ("${classpath}", classpath_of(mc_dir, version, jar_id)),
         ("${classpath_separator}", path_separator().to_string()),
         ("${library_directory}", format!("{mc_dir}/libraries")),
         ("${user_type}", "legacy".into()),
@@ -109,8 +109,8 @@ pub fn library_file(lib: &Value) -> Option<LibraryFile> {
     })
 }
 
-fn classpath_of(mc_dir: &str, version: &Value, id: &str) -> String {
-    let mut parts = vec![format!("{mc_dir}/versions/{id}/{id}.jar")];
+fn classpath_of(mc_dir: &str, version: &Value, jar_id: &str) -> String {
+    let mut parts = vec![format!("{mc_dir}/versions/{jar_id}/{jar_id}.jar")];
 
     for lib in needed_libraries(version) {
         if let Some(file) = library_file(lib) {
