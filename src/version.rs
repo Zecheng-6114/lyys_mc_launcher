@@ -47,7 +47,10 @@ pub fn resolve(mc_dir: &str, id: &str) -> Result<ResolvedVersion, String> {
         merged = merge(merged, child);
     }
 
-    let jar_id = find_jar_id(mc_dir, &ids);
+    let jar_id = merged["jar"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| find_jar_id(mc_dir, &ids));
 
     Ok(ResolvedVersion {
         json: merged,
@@ -94,10 +97,10 @@ fn detect_loader(json: &Value) -> Option<String> {
     if main_class.contains("fabric") || has_lib("fabric-loader") {
         return Some(String::from("fabric"));
     }
-    if has_lib("neoforge") {
+    if has_lib("neoforge") || has_lib("net.neoforged") {
         return Some(String::from("neoforge"));
     }
-    if has_lib("net.minecraftforge") {
+    if has_lib("net.minecraftforge") || main_class.contains("forge") {
         return Some(String::from("forge"));
     }
 

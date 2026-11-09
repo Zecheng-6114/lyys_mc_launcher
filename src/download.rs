@@ -1,13 +1,27 @@
-
 use std::fs;
-use std::io::Read;
-use std::path::Path;
+use std::io::{IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use sha1::{Digest, Sha1};
 
-use crate::launch::{library_file, needed_libraries};
+use crate::launch::{library_file, native_files, needed_libraries};
 
 const MOJANG_MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(20)))
+            .timeout_global(Some(Duration::from_secs(600)))
+            .build()
+            .new_agent()
+    })
+}
 
 pub struct Origins<'a> {
     pub mojang: Option<&'a str>,
@@ -16,13 +30,21 @@ pub struct Origins<'a> {
 
 fn rewrite(url: &str, origins: &Origins) -> (String, bool) {
     if let Some(base) = origins.mojang {
+        let base = base.trim_end_matches('/');
         let rules = [
-            ("https://libraries.minecraft.net/", format!("{base}/libraries/")),
-            ("https://resources.download.minecraft.net/", format!("{base}/assets/")),
+            (
+                "https://libraries.minecraft.net/",
+                format!("{base}/libraries/"),
+            ),
+            (
+                "https://resources.download.minecraft.net/",
+                format!("{base}/assets/"),
+            ),
             ("https://piston-data.mojang.com/", format!("{base}/")),
             ("https://piston-meta.mojang.com/", format!("{base}/")),
             ("https://launcher.mojang.com/", format!("{base}/")),
             ("https://launchermeta.mojang.com/", format!("{base}/")),
+            ("https://meta.fabricmc.net/", format!("{base}/fabric-meta/")),
         ];
 
         for (from, to) in &rules {
@@ -32,65 +54,541 @@ fn rewrite(url: &str, origins: &Origins) -> (String, bool) {
         }
     }
 
-    if let Some(base) = origins.maven {
-        if let Some(rest) = url.strip_prefix("https://") {
-            if let Some(slash) = rest.find('/') {
-                return (format!("{}{}", base.trim_end_matches('/'), &rest[slash..]), false);
+    if let Some(base) = origins.maven
+        && let Some(rest) = url.strip_prefix("https://")
+        && let Some((host, path)) = rest.split_once('/')
+        && is_maven_host(host)
+    {
+        let base = base.trim_end_matches('/');
+        let path = match host {
+            "files.minecraftforge.net" => path.strip_prefix("maven/").unwrap_or(path),
+            "maven.neoforged.net" => path.strip_prefix("releases/").unwrap_or(path),
+            "repo1.maven.org" | "repo.maven.apache.org" => {
+                path.strip_prefix("maven2/").unwrap_or(path)
             }
-        }
+            _ => path,
+        };
+        return (format!("{base}/{path}"), true);
     }
 
     (String::from(url), false)
 }
 
-pub fn fetch(url: &str, dest: &Path, size: Option<u64>, origins: &Origins) -> Result<(), String> {
-    let (target, allow_fallback) = rewrite(url, origins);
-    if let Some(dir) = dest.parent() {
-        if !dir.as_os_str().is_empty() {
-            fs::create_dir_all(dir).map_err(|e| format!("failed to create dir {}: {e}", dir.display()))?;
+fn candidates(url: &str, origins: &Origins) -> Vec<String> {
+    let (target, fallback) = rewrite(url, origins);
+    let mut out = vec![target.clone()];
+
+    if fallback && target != url {
+        out.push(url.to_string());
+    }
+
+    for candidate in [url, target.as_str()] {
+        if let Some(mirror) = neoforge_mirror(candidate)
+            && !out.contains(&mirror)
+        {
+            out.push(mirror);
         }
+    }
+
+    out
+}
+
+fn neoforge_mirror(url: &str) -> Option<String> {
+    url.strip_prefix("https://maven.neoforged.net/releases/")
+        .map(|rest| format!("https://neoforged.forgecdn.net/releases/{rest}"))
+}
+
+fn is_maven_host(host: &str) -> bool {
+    matches!(
+        host,
+        "maven.minecraftforge.net"
+            | "files.minecraftforge.net"
+            | "maven.neoforged.net"
+            | "libraries.minecraft.net"
+            | "repo1.maven.org"
+            | "repo.maven.apache.org"
+    )
+}
+
+pub struct FileTask {
+    pub url: String,
+    pub dest: PathBuf,
+    pub size: Option<u64>,
+    pub sha1: Option<String>,
+}
+
+struct CurrentFile {
+    name: String,
+    done: u64,
+    total: Option<u64>,
+}
+
+struct Progress {
+    files_total: usize,
+    files_done: AtomicUsize,
+    bytes_total: u64,
+    bytes_done: AtomicU64,
+    current: Mutex<Option<CurrentFile>>,
+}
+
+impl Progress {
+    fn begin(&self, name: &str, total: Option<u64>) {
+        let mut current = self.current.lock().unwrap();
+        *current = Some(CurrentFile {
+            name: name.to_string(),
+            done: 0,
+            total,
+        });
+    }
+
+    fn advance(&self, name: &str, bytes: u64) {
+        self.bytes_done.fetch_add(bytes, Ordering::Relaxed);
+
+        let mut current = self.current.lock().unwrap();
+        if let Some(file) = current.as_mut()
+            && file.name == name
+        {
+            file.done += bytes;
+        }
+    }
+
+    fn finish(&self, name: &str) {
+        let mut current = self.current.lock().unwrap();
+        if current
+            .as_ref()
+            .map(|file| file.name == name)
+            .unwrap_or(false)
+        {
+            *current = None;
+        }
+    }
+}
+
+struct Renderer {
+    interactive: bool,
+    drawn: bool,
+    last_bytes: u64,
+    last_tick: Instant,
+}
+
+impl Renderer {
+    fn new(interactive: bool) -> Self {
+        Renderer {
+            interactive,
+            drawn: false,
+            last_bytes: 0,
+            last_tick: Instant::now(),
+        }
+    }
+
+    fn render(&mut self, progress: &Progress) {
+        if !self.interactive {
+            return;
+        }
+
+        let now = Instant::now();
+        let bytes = progress.bytes_done.load(Ordering::Relaxed);
+        let elapsed = now.duration_since(self.last_tick).as_secs_f64();
+        let speed = if elapsed > 0.0 {
+            bytes.saturating_sub(self.last_bytes) as f64 / elapsed
+        } else {
+            0.0
+        };
+        self.last_bytes = bytes;
+        self.last_tick = now;
+
+        let files_done = progress.files_done.load(Ordering::Relaxed);
+        let percent = if progress.bytes_total > 0 {
+            bytes
+                .saturating_mul(100)
+                .checked_div(progress.bytes_total)
+                .unwrap_or(0)
+                .min(100) as usize
+        } else {
+            files_done
+                .saturating_mul(100)
+                .checked_div(progress.files_total)
+                .unwrap_or(0)
+        };
+
+        let current = {
+            let current = progress.current.lock().unwrap();
+            current
+                .as_ref()
+                .map(|file| {
+                    format!(
+                        "{} {}/{}",
+                        truncate(&file.name, 28),
+                        human_size(file.done as f64),
+                        human_size(file.total.unwrap_or(file.done) as f64)
+                    )
+                })
+                .unwrap_or_else(|| String::from("waiting"))
+        };
+
+        print!(
+            "\r\x1b[2K {current}  {speed}/s  total {files_done}/{total}  {bar} {percent:3}%",
+            speed = human_size(speed),
+            total = progress.files_total,
+            bar = progress_bar(percent, 20),
+            percent = percent
+        );
+        let _ = std::io::stdout().flush();
+        self.drawn = true;
+    }
+
+    fn finish(&mut self, progress: &Progress) {
+        if !self.interactive {
+            return;
+        }
+        self.render(progress);
+        if self.drawn {
+            println!();
+        }
+    }
+}
+
+pub fn fetch(url: &str, dest: &Path, size: Option<u64>, origins: &Origins) -> Result<(), String> {
+    transfer(url, dest, size, None, origins, false, None, false)
+}
+
+pub fn fetch_checked(
+    url: &str,
+    dest: &Path,
+    size: Option<u64>,
+    sha1: Option<&str>,
+    origins: &Origins,
+) -> Result<(), String> {
+    transfer(url, dest, size, sha1, origins, false, None, true)
+}
+
+pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    tasks.retain(|task| seen.insert(task.dest.clone()));
+
+    let total = tasks.len();
+    if total == 0 {
+        return Ok(());
+    }
+
+    let bytes_total: u64 = tasks.iter().map(|task| task.size.unwrap_or(0)).sum();
+    let progress = Progress {
+        files_total: total,
+        files_done: AtomicUsize::new(0),
+        bytes_total,
+        bytes_done: AtomicU64::new(0),
+        current: Mutex::new(None),
+    };
+
+    let threads = 8.min(total);
+    let interactive = std::io::stdout().is_terminal();
+    println!("Retrieving packages...");
+
+    let queue: Mutex<Vec<FileTask>> = Mutex::new(tasks);
+    let failure: Mutex<Option<String>> = Mutex::new(None);
+    let finished = AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        let mut renderer = Renderer::new(interactive);
+        let progress_ref = &progress;
+        let finished_ref = &finished;
+
+        let render_thread = scope.spawn(move || {
+            while !finished_ref.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(200));
+                renderer.render(progress_ref);
+            }
+            renderer.finish(progress_ref);
+        });
+
+        let mut workers = Vec::new();
+        for _ in 0..threads {
+            workers.push(scope.spawn(|| {
+                loop {
+                    let task = queue.lock().unwrap().pop();
+                    let Some(task) = task else {
+                        break;
+                    };
+
+                    if let Err(error) = transfer(
+                        &task.url,
+                        &task.dest,
+                        task.size,
+                        task.sha1.as_deref(),
+                        origins,
+                        true,
+                        Some(&progress),
+                        false,
+                    ) {
+                        let mut slot = failure.lock().unwrap();
+                        if slot.is_none() {
+                            *slot = Some(error);
+                        }
+                        continue;
+                    }
+
+                    progress.files_done.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+
+        for worker in workers {
+            let _ = worker.join();
+        }
+        finished.store(true, Ordering::Relaxed);
+        let _ = render_thread.join();
+    });
+
+    let done = progress.files_done.load(Ordering::Relaxed);
+    if interactive {
+        // The renderer already terminated the progress line.
+    } else {
+        println!(
+            "Downloaded {done}/{total} file(s), {}",
+            human_size(progress.bytes_done.load(Ordering::Relaxed) as f64)
+        );
+    }
+
+    match failure.into_inner().unwrap() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transfer(
+    url: &str,
+    dest: &Path,
+    size: Option<u64>,
+    sha1: Option<&str>,
+    origins: &Origins,
+    quiet: bool,
+    progress: Option<&Progress>,
+    verify_existing: bool,
+) -> Result<(), String> {
+    if let Some(dir) = dest.parent()
+        && !dir.as_os_str().is_empty()
+    {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("failed to create dir {}: {e}", dir.display()))?;
     }
 
     if dest.exists() {
-        let same = match (fs::metadata(dest), size) {
-            (Ok(meta), Some(want)) => meta.len() == want,
-            (Ok(_), None) => true,
+        let valid = match (fs::metadata(dest), size) {
+            (Ok(meta), Some(want)) if meta.len() != want => false,
+            (Ok(_), _) if verify_existing && sha1.is_some() => file_sha1(dest)
+                .map(|actual| actual == sha1.unwrap().to_ascii_lowercase())
+                .unwrap_or(false),
+            (Ok(_), _) => true,
             _ => false,
         };
-        if same {
+
+        if valid {
+            if let Some(progress) = progress
+                && let Some(size) = size
+            {
+                progress.bytes_done.fetch_add(size, Ordering::Relaxed);
+            }
             return Ok(());
+        }
+
+        let _ = fs::remove_file(dest);
+    }
+
+    let mut last_error = String::new();
+    for candidate in candidates(url, origins) {
+        if !quiet {
+            println!("downloading {candidate}");
+        }
+
+        for attempt in 0..3 {
+            match download_attempt(&candidate, dest, size, sha1, quiet, progress) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = error;
+                    if http_error_is_client(&last_error) {
+                        break;
+                    }
+                    if attempt < 2 {
+                        std::thread::sleep(Duration::from_millis(300 * (attempt + 1) as u64));
+                    }
+                }
+            }
         }
     }
 
-    println!("downloading {target}");
-    let resp = match ureq::get(&target).call() {
-        Ok(resp) => resp,
-        Err(first) if allow_fallback => {
-            println!("mirror failed, retrying origin");
-            ureq::get(url)
-                .call()
-                .map_err(|e| format!("request failed {url}: {e} (mirror: {first})"))?
+    let _ = fs::remove_file(temp_path(dest));
+    Err(last_error)
+}
+
+fn download_attempt(
+    url: &str,
+    dest: &Path,
+    size: Option<u64>,
+    sha1: Option<&str>,
+    quiet: bool,
+    progress: Option<&Progress>,
+) -> Result<(), String> {
+    let resp = agent()
+        .get(url)
+        .call()
+        .map_err(|e| format!("request failed {url}: {e}"))?;
+
+    let total_hint = size.or_else(|| {
+        resp.headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+    });
+    let name = dest
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if let Some(progress) = progress {
+        progress.begin(&name, total_hint);
+    }
+
+    let interactive = !quiet && std::io::stdout().is_terminal();
+    let show_bar = interactive && total_hint.is_some();
+
+    let temp = temp_path(dest);
+    let mut file =
+        fs::File::create(&temp).map_err(|e| format!("failed to create {}: {e}", temp.display()))?;
+    let mut reader = resp.into_body().into_reader();
+    let mut buf = [0u8; 64 * 1024];
+    let mut downloaded = 0u64;
+    let mut last_draw = Instant::now();
+    let mut hasher = Sha1::new();
+
+    loop {
+        let read = reader
+            .read(&mut buf)
+            .map_err(|e| format!("read failed {url}: {e}"))?;
+        if read == 0 {
+            break;
         }
-        Err(e) => return Err(format!("request failed {target}: {e}")),
-    };
 
-    let mut bytes = Vec::new();
-    resp.into_body()
-        .into_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("read failed {target}: {e}"))?;
+        file.write_all(&buf[..read])
+            .map_err(|e| format!("failed to write {}: {e}", temp.display()))?;
+        hasher.update(&buf[..read]);
+        downloaded += read as u64;
 
-    if let Some(want) = size {
-        if bytes.len() as u64 != want {
+        if let Some(progress) = progress {
+            progress.advance(&name, read as u64);
+        }
+
+        if show_bar && last_draw.elapsed() >= Duration::from_millis(100) {
+            draw_single(total_hint.unwrap_or(0), downloaded, &name);
+            last_draw = Instant::now();
+        }
+    }
+
+    file.flush()
+        .map_err(|e| format!("failed to flush {}: {e}", temp.display()))?;
+    drop(file);
+
+    if let Some(progress) = progress {
+        progress.finish(&name);
+    }
+    if show_bar {
+        draw_single(total_hint.unwrap_or(0), downloaded, &name);
+        println!();
+    }
+
+    if let Some(want) = size
+        && downloaded != want
+    {
+        let _ = fs::remove_file(&temp);
+        return Err(format!(
+            "size mismatch {url}\n expected {want}\n got {downloaded}"
+        ));
+    }
+
+    if let Some(want) = sha1 {
+        let actual = hex(&hasher.finalize());
+        if actual != want.to_ascii_lowercase() {
+            let _ = fs::remove_file(&temp);
             return Err(format!(
-                "size mismatch {target}\n expected {want}\n got {}",
-                bytes.len()
+                "checksum mismatch {url}\n expected {want}\n got {actual}"
             ));
         }
     }
 
-    fs::write(dest, bytes).map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
+    if dest.exists() {
+        fs::remove_file(dest).map_err(|e| format!("failed to replace {}: {e}", dest.display()))?;
+    }
+    fs::rename(&temp, dest).map_err(|e| {
+        format!(
+            "failed to move {} to {}: {e}",
+            temp.display(),
+            dest.display()
+        )
+    })?;
     Ok(())
+}
+
+fn temp_path(dest: &Path) -> PathBuf {
+    let name = dest
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| String::from("download"));
+    dest.with_file_name(format!("{name}.part"))
+}
+
+fn http_error_is_client(error: &str) -> bool {
+    error.contains("http status: 4")
+}
+
+pub fn get_text(url: &str, origins: &Origins) -> Result<String, String> {
+    let mut last_error = String::new();
+    for candidate in candidates(url, origins) {
+        for attempt in 0..3 {
+            match read_text(&candidate) {
+                Ok(text) => return Ok(text),
+                Err(error) => {
+                    last_error = error;
+                    if http_error_is_client(&last_error) {
+                        break;
+                    }
+                    if attempt < 2 {
+                        std::thread::sleep(Duration::from_millis(300 * (attempt + 1) as u64));
+                    }
+                }
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+fn read_text(url: &str) -> Result<String, String> {
+    let resp = agent()
+        .get(url)
+        .call()
+        .map_err(|e| format!("request failed {url}: {e}"))?;
+
+    let mut text = String::new();
+    resp.into_body()
+        .into_reader()
+        .read_to_string(&mut text)
+        .map_err(|e| format!("read failed {url}: {e}"))?;
+
+    Ok(text)
+}
+
+pub fn get_json(url: &str) -> Result<Value, String> {
+    let text = read_text(url)?;
+    serde_json::from_str(&text).map_err(|e| format!("failed to parse {url}: {e}"))
+}
+
+pub fn is_client_error(error: &str) -> bool {
+    http_error_is_client(error)
+}
+
+pub fn fetch_json(url: &str, origins: &Origins) -> Result<Value, String> {
+    let text = get_text(url, origins)?;
+    serde_json::from_str(&text).map_err(|e| format!("failed to parse {url}: {e}"))
 }
 
 pub fn ensure_version_json(mc_dir: &str, id: &str, origins: &Origins) -> Result<Value, String> {
@@ -100,28 +598,24 @@ pub fn ensure_version_json(mc_dir: &str, id: &str, origins: &Origins) -> Result<
         .join(format!("{id}.json"));
 
     if !path.exists() {
-        match origins.mojang {
-            Some(base) => {
-                let url = format!("{base}/version/{id}/json");
-                fetch(&url, &path, None, origins)?;
-            }
-            None => {
-                println!("no local {id}.json, fetching manifest {MOJANG_MANIFEST}");
-                let manifest = get_json(MOJANG_MANIFEST)?;
+        println!("no local {id}.json, fetching manifest");
 
-                let entry = manifest["versions"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|v| v["id"] == id)
-                    .ok_or_else(|| format!("version {id} not found in manifest"))?;
+        let manifest = fetch_json(MOJANG_MANIFEST, origins)?;
+        let entry = manifest["versions"]
+            .as_array()
+            .ok_or_else(|| String::from("manifest has no versions"))?
+            .iter()
+            .find(|v| v["id"] == id)
+            .ok_or_else(|| format!("version {id} not found in manifest"))?;
 
-                fetch(entry["url"].as_str().unwrap(), &path, None, origins)?;
-            }
-        }
+        let url = entry["url"]
+            .as_str()
+            .ok_or_else(|| String::from("manifest entry has no url"))?;
+        fetch(url, &path, None, origins)?;
     }
 
-    let text = fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let text =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("failed to parse {}: {e}", path.display()))
 }
 
@@ -133,46 +627,69 @@ pub fn ensure_version_files(
 ) -> Result<(), String> {
     let client = &version["downloads"]["client"];
 
-    let jar = Path::new(mc_dir)
-        .join("versions")
-        .join(jar_id)
-        .join(format!("{jar_id}.jar"));
-    fetch(
-        client["url"].as_str().unwrap(),
-        &jar,
-        client["size"].as_u64(),
-        origins,
-    )?;
+    let mut tasks = vec![FileTask {
+        url: client["url"]
+            .as_str()
+            .ok_or_else(|| String::from("version has no client url"))?
+            .to_string(),
+        dest: Path::new(mc_dir)
+            .join("versions")
+            .join(jar_id)
+            .join(format!("{jar_id}.jar")),
+        size: client["size"].as_u64(),
+        sha1: client["sha1"].as_str().map(str::to_string),
+    }];
 
-    ensure_libraries(mc_dir, version, origins)
-}
-
-pub fn ensure_libraries(mc_dir: &str, version: &Value, origins: &Origins) -> Result<(), String> {
     for lib in needed_libraries(version) {
         let Some(file) = library_file(lib) else {
             continue;
         };
-        let dest = Path::new(mc_dir).join("libraries").join(&file.path);
-        fetch(&file.url, &dest, file.size, origins)?;
+        tasks.push(FileTask {
+            url: file.url,
+            dest: Path::new(mc_dir).join("libraries").join(&file.path),
+            size: file.size,
+            sha1: file.sha1,
+        });
     }
 
-    Ok(())
+    for native in native_files(version) {
+        tasks.push(FileTask {
+            url: native.url,
+            dest: Path::new(mc_dir).join("libraries").join(&native.path),
+            size: native.size,
+            sha1: native.sha1,
+        });
+    }
+
+    download_all(tasks, origins)
 }
 
-pub fn get_json(url: &str) -> Result<Value, String> {
-    let resp = ureq::get(url)
-        .call()
-        .map_err(|e| format!("request failed {url}: {e}"))?;
+pub fn ensure_libraries(mc_dir: &str, version: &Value, origins: &Origins) -> Result<(), String> {
+    let mut tasks = Vec::new();
 
-    let mut text = String::new();
-    resp.into_body()
-        .into_reader()
-        .read_to_string(&mut text)
-        .map_err(|e| format!("read failed {url}: {e}"))?;
+    for lib in needed_libraries(version) {
+        let Some(file) = library_file(lib) else {
+            continue;
+        };
+        tasks.push(FileTask {
+            url: file.url,
+            dest: Path::new(mc_dir).join("libraries").join(&file.path),
+            size: file.size,
+            sha1: file.sha1,
+        });
+    }
 
-    serde_json::from_str(&text).map_err(|e| format!("failed to parse {url}: {e}"))
+    for native in native_files(version) {
+        tasks.push(FileTask {
+            url: native.url,
+            dest: Path::new(mc_dir).join("libraries").join(&native.path),
+            size: native.size,
+            sha1: native.sha1,
+        });
+    }
+
+    download_all(tasks, origins)
 }
-
 
 pub fn download_instance(
     mc_dir: &str,
@@ -196,14 +713,19 @@ pub fn download_instance(
 
 pub fn ensure_assets(mc_dir: &str, version: &Value, origins: &Origins) -> Result<(), String> {
     let idx = &version["assetIndex"];
-    let id = idx["id"].as_str().unwrap();
+    let id = idx["id"]
+        .as_str()
+        .ok_or_else(|| String::from("version has no asset index id"))?;
     let index_path = Path::new(mc_dir)
         .join("assets")
         .join("indexes")
         .join(format!("{id}.json"));
 
     if !index_path.exists() {
-        fetch(idx["url"].as_str().unwrap(), &index_path, idx["size"].as_u64(), origins)?;
+        let url = idx["url"]
+            .as_str()
+            .ok_or_else(|| String::from("version has no asset index url"))?;
+        fetch(url, &index_path, idx["size"].as_u64(), origins)?;
     }
 
     let text = fs::read_to_string(&index_path)
@@ -215,18 +737,223 @@ pub fn ensure_assets(mc_dir: &str, version: &Value, origins: &Origins) -> Result
         .as_object()
         .ok_or_else(|| String::from("asset index has no objects"))?;
 
+    let mut tasks = Vec::new();
+
     for obj in objects.values() {
-        let hash = obj["hash"].as_str().unwrap();
-        let size = obj["size"].as_u64().unwrap();
+        let hash = obj["hash"]
+            .as_str()
+            .ok_or_else(|| String::from("asset object has no hash"))?;
+        let size = obj["size"]
+            .as_u64()
+            .ok_or_else(|| String::from("asset object has no size"))?;
         let prefix = &hash[..2];
-        let dest = Path::new(mc_dir)
+        tasks.push(FileTask {
+            url: format!("https://resources.download.minecraft.net/{prefix}/{hash}"),
+            dest: Path::new(mc_dir)
+                .join("assets")
+                .join("objects")
+                .join(prefix)
+                .join(hash),
+            size: Some(size),
+            sha1: Some(hash.to_string()),
+        });
+    }
+
+    download_all(tasks, origins)?;
+    materialize_assets(mc_dir, id, &index, origins)
+}
+
+fn materialize_assets(
+    mc_dir: &str,
+    id: &str,
+    index: &Value,
+    _origins: &Origins,
+) -> Result<(), String> {
+    let virtual_assets = index["virtual"].as_bool() == Some(true);
+    let map_to_resources = index["map_to_resources"].as_bool() == Some(true);
+    if !virtual_assets && !map_to_resources {
+        return Ok(());
+    }
+
+    let root = if virtual_assets {
+        Path::new(mc_dir).join("assets").join("virtual").join(id)
+    } else {
+        Path::new(mc_dir).join("resources")
+    };
+    fs::create_dir_all(&root).map_err(|e| format!("failed to create {}: {e}", root.display()))?;
+
+    let Some(objects) = index["objects"].as_object() else {
+        return Ok(());
+    };
+
+    for (name, obj) in objects {
+        let Some(hash) = obj["hash"].as_str() else {
+            continue;
+        };
+        let source = Path::new(mc_dir)
             .join("assets")
             .join("objects")
-            .join(prefix)
+            .join(&hash[..2])
             .join(hash);
-        let url = format!("https://resources.download.minecraft.net/{prefix}/{hash}");
-        fetch(&url, &dest, Some(size), origins)?;
+        let Some(relative) = safe_asset_path(name) else {
+            continue;
+        };
+        let dest = root.join(relative);
+        if dest.exists() {
+            continue;
+        }
+        if let Some(dir) = dest.parent() {
+            fs::create_dir_all(dir)
+                .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+        }
+        fs::copy(&source, &dest)
+            .map_err(|e| format!("failed to materialize asset {}: {e}", dest.display()))?;
     }
 
     Ok(())
+}
+
+fn safe_asset_path(name: &str) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for part in name.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => return None,
+            _ => out.push(part),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+pub fn file_sha1(path: &Path) -> Result<String, String> {
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    let mut hasher = Sha1::new();
+    let mut buf = [0u8; 64 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+
+    Ok(hex(&hasher.finalize()))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn draw_single(total: u64, done: u64, name: &str) {
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+
+    let percent = (done * 100 / total.max(1)).min(100) as usize;
+    let bar = progress_bar(percent, 20);
+
+    print!(
+        "\r\x1b[2K   {bar} {percent:3}% {size:>10}  {name}",
+        size = human_size(done as f64),
+        name = truncate(name, 32)
+    );
+    let _ = std::io::stdout().flush();
+}
+
+fn human_size(bytes: f64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+
+    let mut value = bytes.max(0.0);
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn progress_bar(percent: usize, width: usize) -> String {
+    let filled = width * percent / 100;
+    let empty = width - filled;
+    format!("[{}{}]", "#".repeat(filled), "-".repeat(empty))
+}
+
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+
+    let mut out: String = text.chars().take(width.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_known_mojang_hosts() {
+        let origins = Origins {
+            mojang: Some("https://mirror.example"),
+            maven: None,
+        };
+        let (url, fallback) = rewrite("https://piston-meta.mojang.com/a/b.json", &origins);
+        assert_eq!(url, "https://mirror.example/a/b.json");
+        assert!(fallback);
+    }
+
+    #[test]
+    fn rewrites_only_known_maven_hosts() {
+        let origins = Origins {
+            mojang: None,
+            maven: Some("https://maven.example"),
+        };
+        assert_eq!(
+            rewrite("https://maven.minecraftforge.net/net/a.jar", &origins).0,
+            "https://maven.example/net/a.jar"
+        );
+        assert_eq!(
+            rewrite("https://api.modrinth.com/v2/search", &origins).0,
+            "https://api.modrinth.com/v2/search"
+        );
+    }
+
+    #[test]
+    fn adds_neoforge_mirror_candidate() {
+        let origins = Origins {
+            mojang: None,
+            maven: None,
+        };
+        let urls = candidates(
+            "https://maven.neoforged.net/releases/net/neoforged/neoforge/a.jar",
+            &origins,
+        );
+        assert!(urls.contains(&String::from(
+            "https://neoforged.forgecdn.net/releases/net/neoforged/neoforge/a.jar"
+        )));
+    }
+
+    #[test]
+    fn truncation_keeps_width() {
+        assert_eq!(truncate("abcdefgh", 5), "ab...");
+        assert_eq!(truncate("abc", 5), "abc");
+    }
 }

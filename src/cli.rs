@@ -1,4 +1,3 @@
-
 use std::env;
 
 pub enum Command {
@@ -43,12 +42,13 @@ pub struct DownloadCli {
     pub maven: Option<String>,
     pub loader: Option<String>,
     pub loader_version: Option<String>,
+    pub java: Option<String>,
 }
 
 const USAGE: &str = concat!(
     "usage:\n",
     "  launch: lyys_mc_launcher launch --dir <game_dir> --name <instance> --username <name> [--memory <MB>] [--isolate] [--mirror <url>] [--maven <url>] [--java <path>]\n",
-    "  download: lyys_mc_launcher download --dir <game_dir> --version <version> [--loader <fabric>] [--loader-version <v>] [--name <instance>] [--mirror <url>] [--maven <url>]\n",
+    "  download: lyys_mc_launcher download --dir <game_dir> --version <version> [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--name <instance>] [--java <path>] [--mirror <url>] [--maven <url>]\n",
     "  search: lyys_mc_launcher search --query <text> --type <mod|modpack|resourcepack|shader|datapack> [--loader <a,b>] [--version <x,y>] [--limit <n>]\n",
     "  add:    lyys_mc_launcher add --dir <game_dir> --name <instance> --slug <slug> --type <kind> [--with-optional]",
 );
@@ -103,7 +103,10 @@ fn parse_launch(rest: &[String]) -> LaunchCli {
         missing.push("--username");
     }
     if !missing.is_empty() {
-        eprintln!("error: missing required argument(s): {}", missing.join(", "));
+        eprintln!(
+            "error: missing required argument(s): {}",
+            missing.join(", ")
+        );
         eprintln!("{USAGE}");
         std::process::exit(1);
     }
@@ -131,6 +134,7 @@ fn parse_download(rest: &[String]) -> DownloadCli {
     let mut maven: Option<String> = None;
     let mut loader: Option<String> = None;
     let mut loader_version: Option<String> = None;
+    let mut java: Option<String> = None;
 
     for w in rest.windows(2) {
         match w[0].as_str() {
@@ -141,6 +145,7 @@ fn parse_download(rest: &[String]) -> DownloadCli {
             "--maven" => maven = Some(w[1].clone()),
             "--loader" => loader = Some(w[1].clone()),
             "--loader-version" => loader_version = Some(w[1].clone()),
+            "--java" => java = Some(w[1].clone()),
             _ => {}
         }
     }
@@ -160,6 +165,7 @@ fn parse_download(rest: &[String]) -> DownloadCli {
         maven,
         loader,
         loader_version,
+        java,
     }
 }
 
@@ -227,7 +233,10 @@ fn parse_add(rest: &[String]) -> AddCli {
         missing.push("--type");
     }
     if !missing.is_empty() {
-        eprintln!("error: missing required argument(s): {}", missing.join(", "));
+        eprintln!(
+            "error: missing required argument(s): {}",
+            missing.join(", ")
+        );
         eprintln!("{USAGE}");
         std::process::exit(1);
     }

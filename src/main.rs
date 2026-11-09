@@ -1,14 +1,22 @@
 mod account;
 mod cli;
 mod download;
+mod installer;
 mod launch;
 mod loader;
+mod metadata;
 mod modrinth;
 mod version;
 
 use account::offline_uuid;
 use cli::{AddCli, DownloadCli, LaunchCli, SearchCli};
-use launch::{build_args, LaunchOptions};
+use launch::{LaunchOptions, build_args};
+
+fn absolute_path(path: &str) -> String {
+    std::path::absolute(path)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
 
 fn main() {
     match cli::parse() {
@@ -20,13 +28,7 @@ fn main() {
 }
 
 fn run_search(c: &SearchCli) {
-    match modrinth::search(
-        &c.query,
-        &c.project_type,
-        &c.loaders,
-        &c.versions,
-        c.limit,
-    ) {
+    match modrinth::search(&c.query, &c.project_type, &c.loaders, &c.versions, c.limit) {
         Ok(hits) if hits.is_empty() => println!("no results"),
         Ok(hits) => {
             for hit in hits {
@@ -44,7 +46,8 @@ fn run_search(c: &SearchCli) {
 }
 
 fn run_add(c: &AddCli) {
-    let info = match version::instance_info(&c.mc_dir, &c.instance) {
+    let mc_dir = absolute_path(&c.mc_dir);
+    let info = match version::instance_info(&mc_dir, &c.instance) {
         Ok(info) => info,
         Err(e) => {
             eprintln!("{}", e);
@@ -56,7 +59,7 @@ fn run_add(c: &AddCli) {
     let versions = vec![info.mc_version];
 
     match modrinth::install(
-        &c.mc_dir,
+        &mc_dir,
         &c.instance,
         &c.slug,
         &c.project_type,
@@ -91,23 +94,48 @@ fn run_add(c: &AddCli) {
 }
 
 fn run_download(c: &DownloadCli) {
+    let mc_dir = absolute_path(&c.mc_dir);
     let origins = download::Origins {
         mojang: c.mirror.as_deref(),
         maven: c.maven.as_deref(),
     };
 
-    let result = match c.loader.as_deref() {
+    let loader_name = c.loader.as_deref().map(str::to_ascii_lowercase);
+    let java = launch::resolve_java(c.java.as_deref());
+
+    let result = match loader_name.as_deref() {
         Some("fabric") => loader::install_fabric(
-            &c.mc_dir,
+            &mc_dir,
             &c.version,
             c.loader_version.as_deref(),
             c.name.as_deref(),
             &origins,
         ),
-        Some(other) => Err(format!("unsupported loader: {other} (supported: fabric)")),
+        Some("forge") => loader::install_forge(
+            &mc_dir,
+            &c.version,
+            c.loader_version.as_deref(),
+            c.name.as_deref(),
+            &java,
+            &origins,
+        ),
+        Some("neoforge") => loader::install_neoforge(
+            &mc_dir,
+            &c.version,
+            c.loader_version.as_deref(),
+            c.name.as_deref(),
+            &java,
+            &origins,
+        ),
+        Some(other) => Err(format!(
+            "unsupported loader: {other} (supported: fabric, forge, neoforge)"
+        )),
         None => {
             let instance = c.name.clone().unwrap_or_else(|| c.version.clone());
-            match download::download_instance(&c.mc_dir, &instance, &c.version, &origins) {
+            if let Err(e) = loader::validate_instance_id(&instance) {
+                return eprintln!("{}", e);
+            }
+            match download::download_instance(&mc_dir, &instance, &c.version, &origins) {
                 Ok(()) => Ok(instance),
                 Err(e) => Err(e),
             }
@@ -124,7 +152,8 @@ fn run_download(c: &DownloadCli) {
 }
 
 fn run_launch(c: &LaunchCli) {
-    let mc_dir = c.mc_dir.as_str();
+    let mc_dir = absolute_path(&c.mc_dir);
+    let mc_dir = mc_dir.as_str();
 
     let resolved = version::resolve(mc_dir, &c.instance).unwrap_or_else(|error| {
         eprintln!("{}", error);
@@ -137,6 +166,12 @@ fn run_launch(c: &LaunchCli) {
         maven: c.maven.as_deref(),
     };
 
+    let java = launch::resolve_java(c.java.as_deref());
+    if let Err(e) = launch::check_java(&java, version) {
+        eprintln!("{}", e);
+        return;
+    }
+
     if let Err(e) = download::ensure_version_files(mc_dir, version, &resolved.jar_id, &origins) {
         eprintln!("failed to complete files: {}", e);
         return;
@@ -145,11 +180,15 @@ fn run_launch(c: &LaunchCli) {
         eprintln!("failed to complete assets: {}", e);
         return;
     }
+    if let Err(e) = launch::prepare_natives(mc_dir, version) {
+        eprintln!("failed to prepare natives: {}", e);
+        return;
+    }
 
     let game_dir = if c.isolate {
         format!("{mc_dir}/versions/{}", c.instance)
     } else {
-        c.mc_dir.clone()
+        mc_dir.to_string()
     };
     if let Err(e) = std::fs::create_dir_all(&game_dir) {
         eprintln!("failed to create game directory {}: {}", game_dir, e);
@@ -166,11 +205,14 @@ fn run_launch(c: &LaunchCli) {
 
     let args = build_args(mc_dir, version, &resolved.jar_id, &opts);
 
-    let java = c.java.clone().unwrap_or_else(|| String::from("java"));
-
-    std::process::Command::new(java)
+    let status = std::process::Command::new(&java)
         .args(&args)
         .current_dir(&opts.game_dir)
-        .status()
-        .unwrap();
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("game exited with {status}"),
+        Err(e) => eprintln!("failed to launch {java}: {e}"),
+    }
 }
