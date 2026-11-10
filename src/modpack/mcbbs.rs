@@ -70,7 +70,6 @@ pub fn parse(manifest: &Value, client: &mut CurseClient) -> Result<PackManifest,
                     .to_string_lossy()
                     .replace('\\', "/");
                 let Some(file_api) = &file_api else {
-                    // The file is expected to be inside overrides/.
                     continue;
                 };
                 files.push(PackFile {

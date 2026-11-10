@@ -364,9 +364,7 @@ pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), S
     });
 
     let done = progress.files_done.load(Ordering::Relaxed);
-    if interactive {
-        // The renderer already terminated the progress line.
-    } else {
+    if !interactive {
         println!(
             "Downloaded {done}/{total} file(s), {}",
             human_size(progress.bytes_done.load(Ordering::Relaxed) as f64)

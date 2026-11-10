@@ -166,7 +166,6 @@ pub fn parse(
             && entry["fileName"].as_str().is_none()
             && entry["url"].as_str().is_none()
         {
-            // No API key is needed for an optional file that is not installed.
             continue;
         }
 
