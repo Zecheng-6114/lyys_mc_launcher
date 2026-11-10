@@ -162,7 +162,10 @@ pub fn extract_overrides(
                 continue;
             }
 
-            let name = entry.name().replace('\\', "/");
+            let name = entry
+                .name()
+                .map_err(|e| format!("failed to read archive {}: {e}", path.display()))?
+                .replace('\\', "/");
             let Some(relative) = name.strip_prefix(&dir_prefix) else {
                 continue;
             };
@@ -222,7 +225,10 @@ fn entry_names(archive: &mut zip::ZipArchive<fs::File>) -> Result<Vec<String>, S
         let entry = archive
             .by_index(index)
             .map_err(|e| format!("failed to read archive: {e}"))?;
-        names.push(entry.name().replace('\\', "/"));
+        let name = entry
+            .name()
+            .map_err(|e| format!("failed to read archive: {e}"))?;
+        names.push(name.replace('\\', "/"));
     }
     Ok(names)
 }
@@ -236,7 +242,10 @@ fn find_index(
         let entry = archive
             .by_index(index)
             .map_err(|e| format!("failed to read archive: {e}"))?;
-        if entry.name().replace('\\', "/") == name {
+        let entry_name = entry
+            .name()
+            .map_err(|e| format!("failed to read archive: {e}"))?;
+        if entry_name.replace('\\', "/") == name {
             return Ok(Some(index));
         }
     }

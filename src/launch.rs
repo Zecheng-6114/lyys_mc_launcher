@@ -375,7 +375,10 @@ pub fn prepare_natives(mc_dir: &str, version: &Value) -> Result<(), String> {
                 continue;
             }
 
-            let name = entry.name().to_string();
+            let name = entry
+                .name()
+                .map_err(|e| format!("failed to read native jar {}: {e}", jar.display()))?
+                .to_string();
             if name.starts_with("META-INF/")
                 || native
                     .excludes
