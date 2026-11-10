@@ -49,10 +49,7 @@ pub fn search(
             title: hit["title"].as_str().unwrap_or_default().to_string(),
             downloads: hit["downloads"].as_u64().unwrap_or(0),
             description: hit["description"].as_str().unwrap_or_default().to_string(),
-            project_type: hit["project_type"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
+            project_type: hit["project_type"].as_str().unwrap_or_default().to_string(),
         })
         .collect())
 }
@@ -92,7 +89,7 @@ pub fn install(
         return Err(format!("instance {instance} not found"));
     }
 
-    let target_dir = Path::new(mc_dir).join("versions").join(instance).join(target);
+    let target_dir = Path::new(&crate::instance::game_dir(mc_dir, instance, false)).join(target);
     std::fs::create_dir_all(&target_dir)
         .map_err(|e| format!("failed to create dir {}: {e}", target_dir.display()))?;
 
@@ -112,7 +109,11 @@ pub fn install(
 
         files.push(download_version(&version, &target_dir)?);
 
-        for dep in version["dependencies"].as_array().cloned().unwrap_or_default() {
+        for dep in version["dependencies"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+        {
             match dep["dependency_type"].as_str() {
                 Some("required") => {
                     let next = if let Some(version_id) = dep["version_id"].as_str() {
@@ -161,6 +162,64 @@ pub fn install(
 fn project_title(project_id: &str) -> Option<String> {
     let project = download::get_json(&format!("{API}/project/{project_id}")).ok()?;
     project["title"].as_str().map(|title| title.to_string())
+}
+
+pub fn download_modpack(
+    slug: &str,
+    version_id: Option<&str>,
+    dest: &Path,
+) -> Result<String, String> {
+    let version = match version_id {
+        Some(id) => version_by_id(id).or_else(|_| {
+            let body = download::get_json(&format!("{API}/project/{slug}/version"))?;
+            let list = body
+                .as_array()
+                .ok_or_else(|| String::from("modrinth: malformed version list"))?;
+            list.iter()
+                .find(|version| {
+                    version["id"].as_str() == Some(id)
+                        || version["version_number"].as_str() == Some(id)
+                })
+                .cloned()
+                .ok_or_else(|| format!("modrinth: version {id} not found for {slug}"))
+        })?,
+        None => latest_version(slug, &[], &[])?,
+    };
+
+    let files = version["files"]
+        .as_array()
+        .ok_or_else(|| String::from("modrinth: version has no files"))?;
+    let file = files
+        .iter()
+        .find(|file| {
+            file["filename"]
+                .as_str()
+                .map(|name| name.ends_with(".mrpack"))
+                .unwrap_or(false)
+        })
+        .or_else(|| files.first())
+        .ok_or_else(|| format!("modrinth: no modpack file for {slug}"))?;
+
+    let url = file["url"]
+        .as_str()
+        .ok_or_else(|| String::from("modrinth: modpack file has no url"))?;
+    let plain = Origins {
+        mojang: None,
+        maven: None,
+    };
+    download::fetch_checked(
+        url,
+        dest,
+        file["size"].as_u64(),
+        file["hashes"]["sha1"].as_str(),
+        &plain,
+    )?;
+
+    Ok(version["version_number"]
+        .as_str()
+        .or_else(|| version["id"].as_str())
+        .unwrap_or("unknown")
+        .to_string())
 }
 
 fn latest_version(slug: &str, loaders: &[String], versions: &[String]) -> Result<Value, String> {

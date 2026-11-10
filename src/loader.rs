@@ -24,15 +24,32 @@ pub fn install_fabric(
         None => latest_stable_loader(mc_version, origins)?,
     };
 
+    let id = instance_name(mc_dir, name, &format!("{mc_version}_fabric_{version}"))?;
+    install_fabric_at(mc_dir, mc_version, &version, &id, &base, origins)?;
+
+    write_log(
+        &id,
+        &format!("loader: fabric {version} for minecraft {mc_version}\nversion files: ensured\n"),
+    );
+
+    Ok(id)
+}
+
+pub fn install_fabric_at(
+    mc_dir: &str,
+    mc_version: &str,
+    version: &str,
+    id: &str,
+    base: &Value,
+    origins: &Origins,
+) -> Result<(), String> {
     let mut profile = download::fetch_json(
         &format!("{FABRIC_META}/versions/loader/{mc_version}/{version}/profile/json"),
         origins,
     )?;
+    profile["id"] = Value::String(id.to_string());
 
-    let id = instance_name(mc_dir, name, &format!("{mc_version}_fabric_{version}"))?;
-    profile["id"] = Value::String(id.clone());
-
-    let dir = Path::new(mc_dir).join("versions").join(&id);
+    let dir = Path::new(mc_dir).join("versions").join(id);
     let result = (|| -> Result<(), String> {
         fs::create_dir_all(&dir)
             .map_err(|e| format!("failed to create dir {}: {e}", dir.display()))?;
@@ -40,7 +57,7 @@ pub fn install_fabric(
         fs::write(dir.join(format!("{id}.json")), text)
             .map_err(|e| format!("failed to write version.json: {e}"))?;
 
-        download::ensure_version_files(mc_dir, &base, mc_version, origins)?;
+        download::ensure_version_files(mc_dir, base, mc_version, origins)?;
         download::ensure_libraries(mc_dir, &profile, origins)
     })();
 
@@ -49,12 +66,7 @@ pub fn install_fabric(
         return Err(error);
     }
 
-    write_log(
-        &id,
-        &format!("loader: fabric {version} for minecraft {mc_version}\nversion files: ensured\n"),
-    );
-
-    Ok(id)
+    Ok(())
 }
 
 pub fn install_forge(
@@ -69,6 +81,18 @@ pub fn install_forge(
     install_loader(mc_dir, mc_version, name, "forge", &installer, java, origins)
 }
 
+pub fn install_forge_at(
+    mc_dir: &str,
+    mc_version: &str,
+    loader_version: Option<&str>,
+    id: &str,
+    java: &str,
+    origins: &Origins,
+) -> Result<(), String> {
+    let installer = metadata::forge_installer(mc_version, loader_version, origins)?;
+    install_loader_at(mc_dir, mc_version, id, "forge", &installer, java, origins)
+}
+
 pub fn install_neoforge(
     mc_dir: &str,
     mc_version: &str,
@@ -80,6 +104,20 @@ pub fn install_neoforge(
     let installer = metadata::neoforge_installer(mc_version, loader_version, origins)?;
     install_loader(
         mc_dir, mc_version, name, "neoforge", &installer, java, origins,
+    )
+}
+
+pub fn install_neoforge_at(
+    mc_dir: &str,
+    mc_version: &str,
+    loader_version: Option<&str>,
+    id: &str,
+    java: &str,
+    origins: &Origins,
+) -> Result<(), String> {
+    let installer = metadata::neoforge_installer(mc_version, loader_version, origins)?;
+    install_loader_at(
+        mc_dir, mc_version, id, "neoforge", &installer, java, origins,
     )
 }
 
@@ -97,6 +135,23 @@ fn install_loader(
         name,
         &format!("{mc_version}_{kind}_{}", remote.display_version),
     )?;
+    install_loader_at(mc_dir, mc_version, &id, kind, remote, java, origins)?;
+    Ok(id)
+}
+
+fn install_loader_at(
+    mc_dir: &str,
+    mc_version: &str,
+    id: &str,
+    kind: &str,
+    remote: &metadata::LoaderInstaller,
+    java: &str,
+    origins: &Origins,
+) -> Result<(), String> {
+    let versions = Path::new(mc_dir).join("versions").join(id);
+    if versions.exists() {
+        return Err(format!("instance already exists: {id}"));
+    }
 
     let base = download::ensure_version_json(mc_dir, mc_version, origins)?;
 
@@ -145,11 +200,10 @@ fn install_loader(
 
     download::ensure_version_files(mc_dir, &base, mc_version, origins)?;
 
-    let versions = Path::new(mc_dir).join("versions").join(&id);
     let result = if info.new_format {
         installer::install_new(
             mc_dir,
-            &id,
+            id,
             mc_version,
             &installer_path,
             &info,
@@ -157,13 +211,13 @@ fn install_loader(
             origins,
         )
     } else {
-        installer::install_legacy(mc_dir, &id, mc_version, &installer_path, &info, origins)
+        installer::install_legacy(mc_dir, id, mc_version, &installer_path, &info, origins)
     };
 
     match result {
         Ok(()) => {
             write_log(
-                &id,
+                id,
                 &format!(
                     "loader: {kind} {} for minecraft {mc_version}\ninstaller: {}\nformat: {}\n",
                     remote.version,
@@ -175,7 +229,7 @@ fn install_loader(
                     }
                 ),
             );
-            Ok(id)
+            Ok(())
         }
         Err(error) => {
             let _ = fs::remove_dir_all(&versions);
@@ -208,7 +262,7 @@ fn latest_stable_loader(mc_version: &str, origins: &Origins) -> Result<String, S
         .ok_or_else(|| format!("no Fabric Loader for {mc_version}"))
 }
 
-fn instance_name(mc_dir: &str, name: Option<&str>, base: &str) -> Result<String, String> {
+pub fn instance_name(mc_dir: &str, name: Option<&str>, base: &str) -> Result<String, String> {
     match name {
         Some(name) => {
             validate_instance_id(name)?;
@@ -258,11 +312,11 @@ fn instance_id(mc_dir: &str, base: &str) -> String {
     candidate
 }
 
-fn safe_name(name: &str) -> String {
+pub fn safe_name(name: &str) -> String {
     let mut out: String = name
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
                 c
             } else {
                 '_'
@@ -327,6 +381,7 @@ mod tests {
     #[test]
     fn safe_name_replaces_reserved_characters() {
         assert_eq!(safe_name("1.20.1:forge"), "1.20.1_forge");
+        assert_eq!(safe_name("涟漪之篇·如涟漪之所见"), "涟漪之篇_如涟漪之所见");
         assert_eq!(safe_name(""), "instance");
     }
 }

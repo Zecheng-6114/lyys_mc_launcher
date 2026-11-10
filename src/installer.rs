@@ -442,10 +442,11 @@ fn download_profile_libraries(
             continue;
         };
         tasks.push(FileTask {
-            url: file.url,
+            urls: vec![file.url],
             dest: Path::new(mc_dir).join("libraries").join(&file.path),
             size: file.size,
             sha1: file.sha1,
+            sha512: None,
         });
     }
 

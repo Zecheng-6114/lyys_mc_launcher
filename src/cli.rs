@@ -5,6 +5,7 @@ pub enum Command {
     Download(DownloadCli),
     Search(SearchCli),
     Add(AddCli),
+    Import(ImportCli),
 }
 
 pub struct LaunchCli {
@@ -34,6 +35,22 @@ pub struct AddCli {
     pub with_optional: bool,
 }
 
+pub struct ImportCli {
+    pub mc_dir: String,
+    pub file: Option<String>,
+    pub url: Option<String>,
+    pub modrinth: Option<String>,
+    pub pack_version: Option<String>,
+    pub name: Option<String>,
+    pub java: Option<String>,
+    pub mirror: Option<String>,
+    pub maven: Option<String>,
+    pub with_optional: bool,
+    pub dry_run: bool,
+    pub loader: Option<String>,
+    pub loader_version: Option<String>,
+}
+
 pub struct DownloadCli {
     pub mc_dir: String,
     pub version: String,
@@ -50,7 +67,8 @@ const USAGE: &str = concat!(
     "  launch: lyys_mc_launcher launch --dir <game_dir> --name <instance> --username <name> [--memory <MB>] [--isolate] [--mirror <url>] [--maven <url>] [--java <path>]\n",
     "  download: lyys_mc_launcher download --dir <game_dir> --version <version> [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--name <instance>] [--java <path>] [--mirror <url>] [--maven <url>]\n",
     "  search: lyys_mc_launcher search --query <text> --type <mod|modpack|resourcepack|shader|datapack> [--loader <a,b>] [--version <x,y>] [--limit <n>]\n",
-    "  add:    lyys_mc_launcher add --dir <game_dir> --name <instance> --slug <slug> --type <kind> [--with-optional]",
+    "  add:    lyys_mc_launcher add --dir <game_dir> --name <instance> --slug <slug> --type <kind> [--with-optional]\n",
+    "  import: lyys_mc_launcher import --dir <game_dir> (--file <archive> | --url <url> | --modrinth <slug>) [--pack-version <id>] [--name <instance>] [--java <path>] [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--with-optional] [--dry-run] [--mirror <url>] [--maven <url>]",
 );
 
 pub fn parse() -> Command {
@@ -62,6 +80,7 @@ pub fn parse() -> Command {
         Some("download") => Command::Download(parse_download(rest)),
         Some("search") => Command::Search(parse_search(rest)),
         Some("add") => Command::Add(parse_add(rest)),
+        Some("import") => Command::Import(parse_import(rest)),
         _ => {
             println!("{USAGE}");
             std::process::exit(0);
@@ -250,6 +269,77 @@ fn parse_add(rest: &[String]) -> AddCli {
         slug: slug.unwrap(),
         project_type: project_type.unwrap(),
         with_optional,
+    }
+}
+
+fn parse_import(rest: &[String]) -> ImportCli {
+    let mut mc_dir: Option<String> = None;
+    let mut file: Option<String> = None;
+    let mut url: Option<String> = None;
+    let mut modrinth: Option<String> = None;
+    let mut pack_version: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut java: Option<String> = None;
+    let mut mirror: Option<String> = None;
+    let mut maven: Option<String> = None;
+    let mut loader: Option<String> = None;
+    let mut loader_version: Option<String> = None;
+
+    for w in rest.windows(2) {
+        match w[0].as_str() {
+            "--dir" => mc_dir = Some(w[1].clone()),
+            "--file" => file = Some(w[1].clone()),
+            "--url" => url = Some(w[1].clone()),
+            "--modrinth" => modrinth = Some(w[1].clone()),
+            "--pack-version" => pack_version = Some(w[1].clone()),
+            "--name" => name = Some(w[1].clone()),
+            "--java" => java = Some(w[1].clone()),
+            "--mirror" => mirror = Some(w[1].clone()),
+            "--maven" => maven = Some(w[1].clone()),
+            "--loader" => loader = Some(w[1].clone()),
+            "--loader-version" => loader_version = Some(w[1].clone()),
+            _ => {}
+        }
+    }
+
+    let with_optional = rest.iter().any(|arg| arg == "--with-optional");
+    let dry_run = rest.iter().any(|arg| arg == "--dry-run");
+
+    let Some(mc_dir) = mc_dir else {
+        eprintln!("error: import requires --dir");
+        eprintln!("{USAGE}");
+        std::process::exit(1);
+    };
+
+    let sources = [file.is_some(), url.is_some(), modrinth.is_some()]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+    if sources != 1 {
+        eprintln!("error: import requires exactly one of --file, --url or --modrinth");
+        eprintln!("{USAGE}");
+        std::process::exit(1);
+    }
+    if pack_version.is_some() && modrinth.is_none() {
+        eprintln!("error: --pack-version can only be used with --modrinth");
+        std::process::exit(1);
+    }
+    check_dir(&mc_dir);
+
+    ImportCli {
+        mc_dir,
+        file,
+        url,
+        modrinth,
+        pack_version,
+        name,
+        java,
+        mirror,
+        maven,
+        with_optional,
+        dry_run,
+        loader,
+        loader_version,
     }
 }
 

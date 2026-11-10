@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use sha1::{Digest, Sha1};
+use sha2::Sha512;
 
 use crate::launch::{library_file, native_files, needed_libraries};
 
@@ -23,6 +24,7 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+#[derive(Clone, Copy)]
 pub struct Origins<'a> {
     pub mojang: Option<&'a str>,
     pub maven: Option<&'a str>,
@@ -111,10 +113,11 @@ fn is_maven_host(host: &str) -> bool {
 }
 
 pub struct FileTask {
-    pub url: String,
+    pub urls: Vec<String>,
     pub dest: PathBuf,
     pub size: Option<u64>,
     pub sha1: Option<String>,
+    pub sha512: Option<String>,
 }
 
 struct CurrentFile {
@@ -249,7 +252,17 @@ impl Renderer {
 }
 
 pub fn fetch(url: &str, dest: &Path, size: Option<u64>, origins: &Origins) -> Result<(), String> {
-    transfer(url, dest, size, None, origins, false, None, false)
+    transfer(
+        &[url.to_string()],
+        dest,
+        size,
+        None,
+        None,
+        origins,
+        false,
+        None,
+        false,
+    )
 }
 
 pub fn fetch_checked(
@@ -259,7 +272,17 @@ pub fn fetch_checked(
     sha1: Option<&str>,
     origins: &Origins,
 ) -> Result<(), String> {
-    transfer(url, dest, size, sha1, origins, false, None, true)
+    transfer(
+        &[url.to_string()],
+        dest,
+        size,
+        sha1,
+        None,
+        origins,
+        false,
+        None,
+        true,
+    )
 }
 
 pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), String> {
@@ -311,10 +334,11 @@ pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), S
                     };
 
                     if let Err(error) = transfer(
-                        &task.url,
+                        &task.urls,
                         &task.dest,
                         task.size,
                         task.sha1.as_deref(),
+                        task.sha512.as_deref(),
                         origins,
                         true,
                         Some(&progress),
@@ -357,10 +381,11 @@ pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), S
 
 #[allow(clippy::too_many_arguments)]
 fn transfer(
-    url: &str,
+    urls: &[String],
     dest: &Path,
     size: Option<u64>,
     sha1: Option<&str>,
+    sha512: Option<&str>,
     origins: &Origins,
     quiet: bool,
     progress: Option<&Progress>,
@@ -376,6 +401,9 @@ fn transfer(
     if dest.exists() {
         let valid = match (fs::metadata(dest), size) {
             (Ok(meta), Some(want)) if meta.len() != want => false,
+            (Ok(_), _) if verify_existing && sha512.is_some() => file_sha512(dest)
+                .map(|actual| actual == sha512.unwrap().to_ascii_lowercase())
+                .unwrap_or(false),
             (Ok(_), _) if verify_existing && sha1.is_some() => file_sha1(dest)
                 .map(|actual| actual == sha1.unwrap().to_ascii_lowercase())
                 .unwrap_or(false),
@@ -396,21 +424,28 @@ fn transfer(
     }
 
     let mut last_error = String::new();
-    for candidate in candidates(url, origins) {
-        if !quiet {
-            println!("downloading {candidate}");
-        }
+    let mut seen = std::collections::HashSet::new();
 
-        for attempt in 0..3 {
-            match download_attempt(&candidate, dest, size, sha1, quiet, progress) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    last_error = error;
-                    if http_error_is_client(&last_error) {
-                        break;
-                    }
-                    if attempt < 2 {
-                        std::thread::sleep(Duration::from_millis(300 * (attempt + 1) as u64));
+    for url in urls {
+        for candidate in candidates(url, origins) {
+            if !seen.insert(candidate.clone()) {
+                continue;
+            }
+            if !quiet {
+                println!("downloading {candidate}");
+            }
+
+            for attempt in 0..3 {
+                match download_attempt(&candidate, dest, size, sha1, sha512, quiet, progress) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        last_error = error;
+                        if http_error_is_client(&last_error) {
+                            break;
+                        }
+                        if attempt < 2 {
+                            std::thread::sleep(Duration::from_millis(300 * (attempt + 1) as u64));
+                        }
                     }
                 }
             }
@@ -418,7 +453,11 @@ fn transfer(
     }
 
     let _ = fs::remove_file(temp_path(dest));
-    Err(last_error)
+    if last_error.is_empty() {
+        Err(format!("no download URL for {}", dest.display()))
+    } else {
+        Err(last_error)
+    }
 }
 
 fn download_attempt(
@@ -426,6 +465,7 @@ fn download_attempt(
     dest: &Path,
     size: Option<u64>,
     sha1: Option<&str>,
+    sha512: Option<&str>,
     quiet: bool,
     progress: Option<&Progress>,
 ) -> Result<(), String> {
@@ -459,7 +499,8 @@ fn download_attempt(
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded = 0u64;
     let mut last_draw = Instant::now();
-    let mut hasher = Sha1::new();
+    let mut sha1_hasher = sha1.map(|_| Sha1::new());
+    let mut sha512_hasher = sha512.map(|_| Sha512::new());
 
     loop {
         let read = reader
@@ -471,7 +512,12 @@ fn download_attempt(
 
         file.write_all(&buf[..read])
             .map_err(|e| format!("failed to write {}: {e}", temp.display()))?;
-        hasher.update(&buf[..read]);
+        if let Some(hasher) = sha1_hasher.as_mut() {
+            hasher.update(&buf[..read]);
+        }
+        if let Some(hasher) = sha512_hasher.as_mut() {
+            hasher.update(&buf[..read]);
+        }
         downloaded += read as u64;
 
         if let Some(progress) = progress {
@@ -505,12 +551,24 @@ fn download_attempt(
         ));
     }
 
-    if let Some(want) = sha1 {
+    if let Some(hasher) = sha512_hasher {
         let actual = hex(&hasher.finalize());
-        if actual != want.to_ascii_lowercase() {
+        if actual != sha512.unwrap_or_default().to_ascii_lowercase() {
             let _ = fs::remove_file(&temp);
             return Err(format!(
-                "checksum mismatch {url}\n expected {want}\n got {actual}"
+                "sha512 mismatch {url}\n expected {}\n got {actual}",
+                sha512.unwrap_or_default()
+            ));
+        }
+    }
+
+    if let Some(hasher) = sha1_hasher {
+        let actual = hex(&hasher.finalize());
+        if actual != sha1.unwrap_or_default().to_ascii_lowercase() {
+            let _ = fs::remove_file(&temp);
+            return Err(format!(
+                "sha1 mismatch {url}\n expected {}\n got {actual}",
+                sha1.unwrap_or_default()
             ));
         }
     }
@@ -582,6 +640,23 @@ pub fn get_json(url: &str) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("failed to parse {url}: {e}"))
 }
 
+pub fn get_json_with_headers(url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
+    let mut request = agent().get(url);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+
+    let resp = request
+        .call()
+        .map_err(|e| format!("request failed {url}: {e}"))?;
+    let mut text = String::new();
+    resp.into_body()
+        .into_reader()
+        .read_to_string(&mut text)
+        .map_err(|e| format!("read failed {url}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("failed to parse {url}: {e}"))
+}
+
 pub fn is_client_error(error: &str) -> bool {
     http_error_is_client(error)
 }
@@ -628,16 +703,19 @@ pub fn ensure_version_files(
     let client = &version["downloads"]["client"];
 
     let mut tasks = vec![FileTask {
-        url: client["url"]
-            .as_str()
-            .ok_or_else(|| String::from("version has no client url"))?
-            .to_string(),
+        urls: vec![
+            client["url"]
+                .as_str()
+                .ok_or_else(|| String::from("version has no client url"))?
+                .to_string(),
+        ],
         dest: Path::new(mc_dir)
             .join("versions")
             .join(jar_id)
             .join(format!("{jar_id}.jar")),
         size: client["size"].as_u64(),
         sha1: client["sha1"].as_str().map(str::to_string),
+        sha512: None,
     }];
 
     for lib in needed_libraries(version) {
@@ -645,19 +723,21 @@ pub fn ensure_version_files(
             continue;
         };
         tasks.push(FileTask {
-            url: file.url,
+            urls: vec![file.url],
             dest: Path::new(mc_dir).join("libraries").join(&file.path),
             size: file.size,
             sha1: file.sha1,
+            sha512: None,
         });
     }
 
     for native in native_files(version) {
         tasks.push(FileTask {
-            url: native.url,
+            urls: vec![native.url],
             dest: Path::new(mc_dir).join("libraries").join(&native.path),
             size: native.size,
             sha1: native.sha1,
+            sha512: None,
         });
     }
 
@@ -672,19 +752,21 @@ pub fn ensure_libraries(mc_dir: &str, version: &Value, origins: &Origins) -> Res
             continue;
         };
         tasks.push(FileTask {
-            url: file.url,
+            urls: vec![file.url],
             dest: Path::new(mc_dir).join("libraries").join(&file.path),
             size: file.size,
             sha1: file.sha1,
+            sha512: None,
         });
     }
 
     for native in native_files(version) {
         tasks.push(FileTask {
-            url: native.url,
+            urls: vec![native.url],
             dest: Path::new(mc_dir).join("libraries").join(&native.path),
             size: native.size,
             sha1: native.sha1,
+            sha512: None,
         });
     }
 
@@ -748,7 +830,9 @@ pub fn ensure_assets(mc_dir: &str, version: &Value, origins: &Origins) -> Result
             .ok_or_else(|| String::from("asset object has no size"))?;
         let prefix = &hash[..2];
         tasks.push(FileTask {
-            url: format!("https://resources.download.minecraft.net/{prefix}/{hash}"),
+            urls: vec![format!(
+                "https://resources.download.minecraft.net/{prefix}/{hash}"
+            )],
             dest: Path::new(mc_dir)
                 .join("assets")
                 .join("objects")
@@ -756,6 +840,7 @@ pub fn ensure_assets(mc_dir: &str, version: &Value, origins: &Origins) -> Result
                 .join(hash),
             size: Some(size),
             sha1: Some(hash.to_string()),
+            sha512: None,
         });
     }
 
@@ -846,6 +931,47 @@ pub fn file_sha1(path: &Path) -> Result<String, String> {
     }
 
     Ok(hex(&hasher.finalize()))
+}
+
+pub fn file_sha512(path: &Path) -> Result<String, String> {
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    let mut hasher = Sha512::new();
+    let mut buf = [0u8; 64 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+
+    Ok(hex(&hasher.finalize()))
+}
+
+pub fn encode_path(input: &str) -> String {
+    encode_uri(input, true)
+}
+
+pub fn encode_component(input: &str) -> String {
+    encode_uri(input, false)
+}
+
+fn encode_uri(input: &str, allow_slash: bool) -> String {
+    let mut out = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            b'/' if allow_slash => out.push('/'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -949,6 +1075,15 @@ mod tests {
         assert!(urls.contains(&String::from(
             "https://neoforged.forgecdn.net/releases/net/neoforged/neoforge/a.jar"
         )));
+    }
+
+    #[test]
+    fn path_encoding_keeps_slashes_and_escapes_unicode() {
+        assert_eq!(
+            encode_path("mods/中文 文件.jar"),
+            "mods/%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6.jar"
+        );
+        assert_eq!(encode_component("a b.jar"), "a%20b.jar");
     }
 
     #[test]
