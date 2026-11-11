@@ -24,37 +24,21 @@ use crate::instance::{self, LaunchConfig};
 mod skin {
     use gpui::{Rgba, rgb};
 
-    /// 窗口外框与标题栏
     pub const WINDOW: u32 = 0x0f0f0f;
-    /// 标题栏下方细分隔
     pub const TITLEBAR_LINE: u32 = 0x1f1f1f;
-    /// 左侧栏面板
     pub const PANEL: u32 = 0x242424;
-    /// 左侧栏正文
     pub const SIDEBAR_TEXT: u32 = 0xd0d0d0;
-    /// 主内容区
     pub const CONTENT: u32 = 0x161616;
-    /// 卡片
     pub const CARD: u32 = 0x242424;
-    /// 卡片内的分隔线
     pub const DIVIDER: u32 = 0x2f2f2f;
-    /// 标题栏应用图标底
     pub const APP_ICON: u32 = 0xfafafa;
-    /// 悬浮态
     pub const HOVER: u32 = 0x2e2e2e;
-    /// 选中态
     pub const ACTIVE: u32 = 0x3a3a3a;
-    /// 输入框填充
     pub const FIELD: u32 = 0x2f2f2f;
-    /// 输入框描边
     pub const FIELD_BORDER: u32 = 0x3f3f3f;
-    /// 正文
     pub const TEXT: u32 = 0xfafafa;
-    /// 次要文本
     pub const MUTED: u32 = 0xa3a3a3;
-    /// 极弱提示文本
     pub const FAINT: u32 = 0x757575;
-    /// 主按钮/强调
     pub const ACCENT: u32 = 0xfafafa;
     pub const ACCENT_HOVER: u32 = 0xffffff;
     pub const ACCENT_ACTIVE: u32 = 0xe4e4e4;
@@ -67,7 +51,6 @@ mod skin {
     }
 }
 
-/// 把组件库主题对齐到参考设计的层级：窗口 → 面板 → 卡片 → 控件。
 fn apply_skin(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
     Theme::update(cx, |theme| {
@@ -900,7 +883,6 @@ impl Render for LauncherUi {
     }
 }
 
-/// 标题栏品牌标记：白色圆角块里的几何 L。
 fn brand_mark() -> Div {
     div()
         .w(px(26.))
@@ -927,7 +909,6 @@ fn dot(color: u32, size: f32) -> Div {
         .bg(skin::c(color))
 }
 
-/// 卡片容器：设置页里的分组单元。
 fn panel() -> Div {
     div()
         .w_full()
@@ -938,7 +919,6 @@ fn panel() -> Div {
         .overflow_hidden()
 }
 
-/// 卡片内一行：左侧说明，右侧控件。
 fn row() -> Div {
     h_flex()
         .w_full()
