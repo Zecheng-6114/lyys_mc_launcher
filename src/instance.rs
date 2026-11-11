@@ -4,6 +4,17 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 pub const METADATA_FILE: &str = "lyys-instance.json";
+pub const LAUNCH_FILE: &str = "launch.json";
+
+#[derive(Default, Clone)]
+pub struct LaunchConfig {
+    pub username: Option<String>,
+    pub memory: Option<u32>,
+    pub java: Option<String>,
+    pub mirror: Option<String>,
+    pub maven: Option<String>,
+    pub isolate: Option<bool>,
+}
 
 pub struct ModpackRecord<'a> {
     pub provider: &'a str,
@@ -27,9 +38,80 @@ pub fn read_metadata(mc_dir: &str, instance: &str) -> Option<Value> {
 }
 
 pub fn is_isolated(mc_dir: &str, instance: &str) -> bool {
-    read_metadata(mc_dir, instance)
-        .and_then(|metadata| metadata["isolate"].as_bool())
+    read_launch_config(mc_dir, instance)
+        .isolate
+        .or_else(|| {
+            read_metadata(mc_dir, instance).and_then(|metadata| metadata["isolate"].as_bool())
+        })
         .unwrap_or(false)
+}
+
+pub fn launch_path(mc_dir: &str, instance: &str) -> PathBuf {
+    Path::new(mc_dir)
+        .join("versions")
+        .join(instance)
+        .join(LAUNCH_FILE)
+}
+
+pub fn read_launch_config(mc_dir: &str, instance: &str) -> LaunchConfig {
+    let Ok(text) = fs::read_to_string(launch_path(mc_dir, instance)) else {
+        return LaunchConfig::default();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return LaunchConfig::default();
+    };
+
+    LaunchConfig {
+        username: non_empty_string(&value, "username"),
+        memory: value["memory"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok()),
+        java: non_empty_string(&value, "java"),
+        mirror: non_empty_string(&value, "mirror"),
+        maven: non_empty_string(&value, "maven"),
+        isolate: value["isolate"].as_bool(),
+    }
+}
+
+pub fn write_launch_config(
+    mc_dir: &str,
+    instance: &str,
+    config: &LaunchConfig,
+) -> Result<(), String> {
+    let path = launch_path(mc_dir, instance);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+    }
+
+    let mut value = serde_json::Map::new();
+    if let Some(username) = &config.username {
+        value.insert(String::from("username"), Value::String(username.clone()));
+    }
+    if let Some(memory) = config.memory {
+        value.insert(String::from("memory"), Value::Number(memory.into()));
+    }
+    if let Some(java) = &config.java {
+        value.insert(String::from("java"), Value::String(java.clone()));
+    }
+    if let Some(mirror) = &config.mirror {
+        value.insert(String::from("mirror"), Value::String(mirror.clone()));
+    }
+    if let Some(maven) = &config.maven {
+        value.insert(String::from("maven"), Value::String(maven.clone()));
+    }
+    if let Some(isolate) = config.isolate {
+        value.insert(String::from("isolate"), Value::Bool(isolate));
+    }
+
+    let text = serde_json::to_string_pretty(&Value::Object(value)).map_err(|e| e.to_string())?;
+    fs::write(&path, text).map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
+fn non_empty_string(value: &Value, key: &str) -> Option<String> {
+    value[key]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 pub fn game_dir(mc_dir: &str, instance: &str, isolate: bool) -> String {

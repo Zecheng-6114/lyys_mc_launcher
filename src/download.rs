@@ -1,9 +1,9 @@
 use std::fs;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 use sha1::{Digest, Sha1};
@@ -120,135 +120,9 @@ pub struct FileTask {
     pub sha512: Option<String>,
 }
 
-struct CurrentFile {
-    name: String,
-    done: u64,
-    total: Option<u64>,
-}
-
 struct Progress {
-    files_total: usize,
     files_done: AtomicUsize,
-    bytes_total: u64,
     bytes_done: AtomicU64,
-    current: Mutex<Option<CurrentFile>>,
-}
-
-impl Progress {
-    fn begin(&self, name: &str, total: Option<u64>) {
-        let mut current = self.current.lock().unwrap();
-        *current = Some(CurrentFile {
-            name: name.to_string(),
-            done: 0,
-            total,
-        });
-    }
-
-    fn advance(&self, name: &str, bytes: u64) {
-        self.bytes_done.fetch_add(bytes, Ordering::Relaxed);
-
-        let mut current = self.current.lock().unwrap();
-        if let Some(file) = current.as_mut()
-            && file.name == name
-        {
-            file.done += bytes;
-        }
-    }
-
-    fn finish(&self, name: &str) {
-        let mut current = self.current.lock().unwrap();
-        if current
-            .as_ref()
-            .map(|file| file.name == name)
-            .unwrap_or(false)
-        {
-            *current = None;
-        }
-    }
-}
-
-struct Renderer {
-    interactive: bool,
-    drawn: bool,
-    last_bytes: u64,
-    last_tick: Instant,
-}
-
-impl Renderer {
-    fn new(interactive: bool) -> Self {
-        Renderer {
-            interactive,
-            drawn: false,
-            last_bytes: 0,
-            last_tick: Instant::now(),
-        }
-    }
-
-    fn render(&mut self, progress: &Progress) {
-        if !self.interactive {
-            return;
-        }
-
-        let now = Instant::now();
-        let bytes = progress.bytes_done.load(Ordering::Relaxed);
-        let elapsed = now.duration_since(self.last_tick).as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            bytes.saturating_sub(self.last_bytes) as f64 / elapsed
-        } else {
-            0.0
-        };
-        self.last_bytes = bytes;
-        self.last_tick = now;
-
-        let files_done = progress.files_done.load(Ordering::Relaxed);
-        let percent = if progress.bytes_total > 0 {
-            bytes
-                .saturating_mul(100)
-                .checked_div(progress.bytes_total)
-                .unwrap_or(0)
-                .min(100) as usize
-        } else {
-            files_done
-                .saturating_mul(100)
-                .checked_div(progress.files_total)
-                .unwrap_or(0)
-        };
-
-        let current = {
-            let current = progress.current.lock().unwrap();
-            current
-                .as_ref()
-                .map(|file| {
-                    format!(
-                        "{} {}/{}",
-                        truncate(&file.name, 28),
-                        human_size(file.done as f64),
-                        human_size(file.total.unwrap_or(file.done) as f64)
-                    )
-                })
-                .unwrap_or_else(|| String::from("waiting"))
-        };
-
-        print!(
-            "\r\x1b[2K {current}  {speed}/s  total {files_done}/{total}  {bar} {percent:3}%",
-            speed = human_size(speed),
-            total = progress.files_total,
-            bar = progress_bar(percent, 20),
-            percent = percent
-        );
-        let _ = std::io::stdout().flush();
-        self.drawn = true;
-    }
-
-    fn finish(&mut self, progress: &Progress) {
-        if !self.interactive {
-            return;
-        }
-        self.render(progress);
-        if self.drawn {
-            println!();
-        }
-    }
 }
 
 pub fn fetch(url: &str, dest: &Path, size: Option<u64>, origins: &Origins) -> Result<(), String> {
@@ -294,36 +168,18 @@ pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), S
         return Ok(());
     }
 
-    let bytes_total: u64 = tasks.iter().map(|task| task.size.unwrap_or(0)).sum();
     let progress = Progress {
-        files_total: total,
         files_done: AtomicUsize::new(0),
-        bytes_total,
         bytes_done: AtomicU64::new(0),
-        current: Mutex::new(None),
     };
 
     let threads = 8.min(total);
-    let interactive = std::io::stdout().is_terminal();
     println!("Retrieving packages...");
 
     let queue: Mutex<Vec<FileTask>> = Mutex::new(tasks);
     let failure: Mutex<Option<String>> = Mutex::new(None);
-    let finished = AtomicBool::new(false);
 
     std::thread::scope(|scope| {
-        let mut renderer = Renderer::new(interactive);
-        let progress_ref = &progress;
-        let finished_ref = &finished;
-
-        let render_thread = scope.spawn(move || {
-            while !finished_ref.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(200));
-                renderer.render(progress_ref);
-            }
-            renderer.finish(progress_ref);
-        });
-
         let mut workers = Vec::new();
         for _ in 0..threads {
             workers.push(scope.spawn(|| {
@@ -332,6 +188,13 @@ pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), S
                     let Some(task) = task else {
                         break;
                     };
+
+                    let name = task
+                        .dest
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| task.dest.to_string_lossy().to_string());
+                    println!("downloading {name}");
 
                     if let Err(error) = transfer(
                         &task.urls,
@@ -359,17 +222,13 @@ pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), S
         for worker in workers {
             let _ = worker.join();
         }
-        finished.store(true, Ordering::Relaxed);
-        let _ = render_thread.join();
     });
 
     let done = progress.files_done.load(Ordering::Relaxed);
-    if !interactive {
-        println!(
-            "Downloaded {done}/{total} file(s), {}",
-            human_size(progress.bytes_done.load(Ordering::Relaxed) as f64)
-        );
-    }
+    println!(
+        "Downloaded {done}/{total} file(s), {}",
+        human_size(progress.bytes_done.load(Ordering::Relaxed) as f64)
+    );
 
     match failure.into_inner().unwrap() {
         Some(error) => Err(error),
@@ -434,7 +293,7 @@ fn transfer(
             }
 
             for attempt in 0..3 {
-                match download_attempt(&candidate, dest, size, sha1, sha512, quiet, progress) {
+                match download_attempt(&candidate, dest, size, sha1, sha512, progress) {
                     Ok(()) => return Ok(()),
                     Err(error) => {
                         last_error = error;
@@ -464,7 +323,6 @@ fn download_attempt(
     size: Option<u64>,
     sha1: Option<&str>,
     sha512: Option<&str>,
-    quiet: bool,
     progress: Option<&Progress>,
 ) -> Result<(), String> {
     let resp = agent()
@@ -472,31 +330,12 @@ fn download_attempt(
         .call()
         .map_err(|e| format!("request failed {url}: {e}"))?;
 
-    let total_hint = size.or_else(|| {
-        resp.headers()
-            .get("content-length")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-    });
-    let name = dest
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    if let Some(progress) = progress {
-        progress.begin(&name, total_hint);
-    }
-
-    let interactive = !quiet && std::io::stdout().is_terminal();
-    let show_bar = interactive && total_hint.is_some();
-
     let temp = temp_path(dest);
     let mut file =
         fs::File::create(&temp).map_err(|e| format!("failed to create {}: {e}", temp.display()))?;
     let mut reader = resp.into_body().into_reader();
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded = 0u64;
-    let mut last_draw = Instant::now();
     let mut sha1_hasher = sha1.map(|_| Sha1::new());
     let mut sha512_hasher = sha512.map(|_| Sha512::new());
 
@@ -519,26 +358,15 @@ fn download_attempt(
         downloaded += read as u64;
 
         if let Some(progress) = progress {
-            progress.advance(&name, read as u64);
-        }
-
-        if show_bar && last_draw.elapsed() >= Duration::from_millis(100) {
-            draw_single(total_hint.unwrap_or(0), downloaded, &name);
-            last_draw = Instant::now();
+            progress
+                .bytes_done
+                .fetch_add(read as u64, Ordering::Relaxed);
         }
     }
 
     file.flush()
         .map_err(|e| format!("failed to flush {}: {e}", temp.display()))?;
     drop(file);
-
-    if let Some(progress) = progress {
-        progress.finish(&name);
-    }
-    if show_bar {
-        draw_single(total_hint.unwrap_or(0), downloaded, &name);
-        println!();
-    }
 
     if let Some(want) = size
         && downloaded != want
@@ -690,6 +518,60 @@ pub fn ensure_version_json(mc_dir: &str, id: &str, origins: &Origins) -> Result<
     let text =
         fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("failed to parse {}: {e}", path.display()))
+}
+
+pub fn fetch_version_json_cached(
+    mc_dir: &str,
+    id: &str,
+    origins: &Origins,
+) -> Result<Value, String> {
+    let primary = Path::new(mc_dir)
+        .join("versions")
+        .join(id)
+        .join(format!("{id}.json"));
+    let cached = Path::new(mc_dir)
+        .join(".cache")
+        .join("versions")
+        .join(id)
+        .join(format!("{id}.json"));
+
+    for path in [&primary, &cached] {
+        if path.is_file() {
+            let text = fs::read_to_string(path)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+            let json: Value = serde_json::from_str(&text)
+                .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+            return Ok(json);
+        }
+    }
+
+    println!("no local {id}.json, fetching manifest");
+
+    let manifest = fetch_json(MOJANG_MANIFEST, origins)?;
+    let entry = manifest["versions"]
+        .as_array()
+        .ok_or_else(|| String::from("manifest has no versions"))?
+        .iter()
+        .find(|v| v["id"] == id)
+        .ok_or_else(|| format!("version {id} not found in manifest"))?;
+
+    let url = entry["url"]
+        .as_str()
+        .ok_or_else(|| String::from("manifest entry has no url"))?;
+    if let Some(dir) = cached.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("failed to create dir {}: {e}", dir.display()))?;
+    }
+    fetch(url, &cached, None, origins)?;
+
+    let text = fs::read_to_string(&cached)
+        .map_err(|e| format!("failed to read {}: {e}", cached.display()))?;
+    let json: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse {}: {e}", cached.display()))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&cached);
+        })?;
+    Ok(json)
 }
 
 pub fn ensure_version_files(
@@ -980,22 +862,6 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-fn draw_single(total: u64, done: u64, name: &str) {
-    if !std::io::stdout().is_terminal() {
-        return;
-    }
-
-    let percent = (done * 100 / total.max(1)).min(100) as usize;
-    let bar = progress_bar(percent, 20);
-
-    print!(
-        "\r\x1b[2K   {bar} {percent:3}% {size:>10}  {name}",
-        size = human_size(done as f64),
-        name = truncate(name, 32)
-    );
-    let _ = std::io::stdout().flush();
-}
-
 fn human_size(bytes: f64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
 
@@ -1011,22 +877,6 @@ fn human_size(bytes: f64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
-}
-
-fn progress_bar(percent: usize, width: usize) -> String {
-    let filled = width * percent / 100;
-    let empty = width - filled;
-    format!("[{}{}]", "#".repeat(filled), "-".repeat(empty))
-}
-
-fn truncate(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-
-    let mut out: String = text.chars().take(width.saturating_sub(3)).collect();
-    out.push_str("...");
-    out
 }
 
 #[cfg(test)]
@@ -1082,11 +932,5 @@ mod tests {
             "mods/%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6.jar"
         );
         assert_eq!(encode_component("a b.jar"), "a%20b.jar");
-    }
-
-    #[test]
-    fn truncation_keeps_width() {
-        assert_eq!(truncate("abcdefgh", 5), "ab...");
-        assert_eq!(truncate("abc", 5), "abc");
     }
 }

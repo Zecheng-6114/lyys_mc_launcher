@@ -364,7 +364,7 @@ fn install_loader(
                 .ok_or_else(|| String::from("modpack does not specify a loader version"))?;
             match spec.kind {
                 LoaderKind::Fabric => {
-                    let base = download::ensure_version_json(mc_dir, game_version, origins)?;
+                    let base = download::fetch_version_json_cached(mc_dir, game_version, origins)?;
                     loader::install_fabric_at(mc_dir, game_version, version, id, &base, origins)
                 }
                 LoaderKind::Forge => {

@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -77,7 +77,7 @@ pub fn profile_minecraft(profile: &Value) -> Option<&str> {
 pub fn install_legacy(
     mc_dir: &str,
     id: &str,
-    mc_version: &str,
+    _mc_version: &str,
     installer: &Path,
     installer_info: &Installer,
     origins: &Origins,
@@ -104,7 +104,6 @@ pub fn install_legacy(
     version["id"] = Value::String(id.to_string());
     write_version_json(mc_dir, id, &version)?;
 
-    download::ensure_version_json(mc_dir, mc_version, origins)?;
     download::ensure_libraries(mc_dir, &version, origins)?;
     Ok(())
 }
@@ -146,10 +145,11 @@ fn install_processors(
     download_profile_libraries(mc_dir, profile, origins)?;
     write_version_json(mc_dir, version["id"].as_str().unwrap_or_default(), version)?;
 
+    let id = version["id"].as_str().unwrap_or_default();
     let vanilla_jar = Path::new(mc_dir)
         .join("versions")
-        .join(mc_version)
-        .join(format!("{mc_version}.jar"));
+        .join(id)
+        .join(format!("{id}.jar"));
     if !vanilla_jar.is_file() {
         return Err(format!(
             "Minecraft client jar not found: {}",
@@ -219,7 +219,6 @@ fn install_processors(
         run_processor(mc_dir, processor, &vars, java, origins, temp)?;
     }
 
-    download::ensure_version_json(mc_dir, mc_version, origins)?;
     download::ensure_libraries(mc_dir, version, origins)?;
     Ok(())
 }
@@ -242,7 +241,7 @@ fn run_processor(
 
     if let Some((mappings_version, output)) = download_mojmaps(&args) {
         ensure_processor_file(&jar, jar_descriptor, origins)?;
-        let version_json = download::ensure_version_json(mc_dir, &mappings_version, origins)?;
+        let version_json = download::fetch_version_json_cached(mc_dir, &mappings_version, origins)?;
         let mappings = &version_json["downloads"]["client_mappings"];
         let url = mappings["url"]
             .as_str()

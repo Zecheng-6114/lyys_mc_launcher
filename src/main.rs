@@ -1,8 +1,9 @@
 mod account;
 mod cli;
 mod download;
-mod instance;
+mod gui;
 mod installer;
+mod instance;
 mod launch;
 mod loader;
 mod metadata;
@@ -21,12 +22,20 @@ fn absolute_path(path: &str) -> String {
 }
 
 fn main() {
-    match cli::parse() {
-        cli::Command::Launch(c) => run_launch(&c),
-        cli::Command::Download(c) => run_download(&c),
-        cli::Command::Search(c) => run_search(&c),
-        cli::Command::Add(c) => run_add(&c),
-        cli::Command::Import(c) => run_import(&c),
+    if std::env::args().len() > 1 {
+        match cli::parse() {
+            cli::Command::Launch(c) => run_launch(&c),
+            cli::Command::Download(c) => run_download(&c),
+            cli::Command::Search(c) => run_search(&c),
+            cli::Command::Add(c) => run_add(&c),
+            cli::Command::Import(c) => run_import(&c),
+        }
+        return;
+    }
+
+    if let Err(error) = gui::run() {
+        eprintln!("gui error: {error}");
+        std::process::exit(1);
     }
 }
 
@@ -184,9 +193,7 @@ fn run_import(c: &ImportCli) {
         if !name.ends_with(".zip") && !name.ends_with(".mrpack") {
             name = "modpack.zip";
         }
-        let stem = name
-            .trim_end_matches(".mrpack")
-            .trim_end_matches(".zip");
+        let stem = name.trim_end_matches(".mrpack").trim_end_matches(".zip");
         let path = cache.join(format!("{}-{stamp}.zip", loader::safe_name(stem)));
         if let Err(e) = download::fetch(url, &path, None, &plain) {
             eprintln!("failed to download modpack: {e}");
@@ -241,7 +248,11 @@ fn run_import(c: &ImportCli) {
 
     match modpack::import_file(&path, &options) {
         Ok(report) => {
-            let action = if report.installed { "imported" } else { "dry run" };
+            let action = if report.installed {
+                "imported"
+            } else {
+                "dry run"
+            };
             println!(
                 "{} {} pack '{} {}'",
                 action,
@@ -267,10 +278,7 @@ fn run_import(c: &ImportCli) {
                     )
                 })
                 .unwrap_or_else(|| String::from("vanilla"));
-            println!(
-                "minecraft: {} / {}",
-                report.game_version, loader
-            );
+            println!("minecraft: {} / {}", report.game_version, loader);
             println!(
                 "files: {}, overrides: {}, skipped optional: {}, size: {} MiB",
                 report.files,

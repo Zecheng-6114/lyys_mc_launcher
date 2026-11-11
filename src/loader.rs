@@ -17,7 +17,7 @@ pub fn install_fabric(
     name: Option<&str>,
     origins: &Origins,
 ) -> Result<String, String> {
-    let base = download::ensure_version_json(mc_dir, mc_version, origins)?;
+    let base = download::fetch_version_json_cached(mc_dir, mc_version, origins)?;
 
     let version = match loader_version {
         Some(v) => v.to_string(),
@@ -57,8 +57,9 @@ pub fn install_fabric_at(
         fs::write(dir.join(format!("{id}.json")), text)
             .map_err(|e| format!("failed to write version.json: {e}"))?;
 
-        download::ensure_version_files(mc_dir, base, mc_version, origins)?;
-        download::ensure_libraries(mc_dir, &profile, origins)
+        download::ensure_version_files(mc_dir, base, id, origins)?;
+        download::ensure_libraries(mc_dir, &profile, origins)?;
+        crate::version::integrate(mc_dir, id, mc_version, base)
     })();
 
     if let Err(error) = result {
@@ -153,7 +154,7 @@ fn install_loader_at(
         return Err(format!("instance already exists: {id}"));
     }
 
-    let base = download::ensure_version_json(mc_dir, mc_version, origins)?;
+    let base = download::fetch_version_json_cached(mc_dir, mc_version, origins)?;
 
     let cache = Path::new(mc_dir).join(".cache");
     fs::create_dir_all(&cache)
@@ -198,9 +199,9 @@ fn install_loader_at(
         ));
     }
 
-    download::ensure_version_files(mc_dir, &base, mc_version, origins)?;
+    download::ensure_version_files(mc_dir, &base, id, origins)?;
 
-    let result = if info.new_format {
+    let result = (if info.new_format {
         installer::install_new(
             mc_dir,
             id,
@@ -212,7 +213,8 @@ fn install_loader_at(
         )
     } else {
         installer::install_legacy(mc_dir, id, mc_version, &installer_path, &info, origins)
-    };
+    })
+    .and_then(|()| crate::version::integrate(mc_dir, id, mc_version, &base));
 
     match result {
         Ok(()) => {
@@ -330,7 +332,7 @@ pub fn safe_name(name: &str) -> String {
     out
 }
 
-fn base_dir() -> PathBuf {
+pub fn base_dir() -> PathBuf {
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))

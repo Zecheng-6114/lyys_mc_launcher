@@ -73,6 +73,24 @@ pub fn instance_info(mc_dir: &str, id: &str) -> Result<InstanceInfo, String> {
     Ok(InstanceInfo { loader, mc_version })
 }
 
+pub fn integrate(mc_dir: &str, id: &str, mc_version: &str, base: &Value) -> Result<(), String> {
+    let path = Path::new(mc_dir)
+        .join("versions")
+        .join(id)
+        .join(format!("{id}.json"));
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let child: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    let mut merged = merge(base.clone(), child);
+    merged["id"] = Value::String(id.to_string());
+    merged["jar"] = Value::String(id.to_string());
+    merged["clientVersion"] = Value::String(mc_version.to_string());
+
+    let text = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
 fn detect_loader(json: &Value) -> Option<String> {
     let main_class = json["mainClass"]
         .as_str()
