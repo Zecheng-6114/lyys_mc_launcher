@@ -4,15 +4,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, CursorStyle, Entity, IntoElement, ParentElement,
-    Render, ScrollHandle, SharedString, Styled, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    AnyElement, App, AppContext, Bounds, Context, CursorStyle, Div, ElementId, Entity, IntoElement,
+    ParentElement, Render, ScrollHandle, SharedString, Stateful, Styled, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, StyledExt, TitleBar,
-    button::{Button, ButtonVariants},
-    checkbox::Checkbox,
-    h_flex, input,
+    ActiveTheme, Icon, IconName, Root, Sizable, StyledExt, TitleBar, h_flex, input,
+    switch::Switch,
     theme::{Theme, ThemeMode},
     v_flex,
 };
@@ -23,6 +21,109 @@ use smol::channel;
 
 use crate::instance::{self, LaunchConfig};
 
+mod skin {
+    use gpui::{Rgba, rgb};
+
+    /// 窗口外框与标题栏
+    pub const WINDOW: u32 = 0x0f0f0f;
+    /// 标题栏下方细分隔
+    pub const TITLEBAR_LINE: u32 = 0x1f1f1f;
+    /// 左侧栏面板
+    pub const PANEL: u32 = 0x242424;
+    /// 左侧栏正文
+    pub const SIDEBAR_TEXT: u32 = 0xd0d0d0;
+    /// 主内容区
+    pub const CONTENT: u32 = 0x161616;
+    /// 卡片
+    pub const CARD: u32 = 0x242424;
+    /// 卡片内的分隔线
+    pub const DIVIDER: u32 = 0x2f2f2f;
+    /// 标题栏应用图标底
+    pub const APP_ICON: u32 = 0xfafafa;
+    /// 悬浮态
+    pub const HOVER: u32 = 0x2e2e2e;
+    /// 选中态
+    pub const ACTIVE: u32 = 0x3a3a3a;
+    /// 输入框填充
+    pub const FIELD: u32 = 0x2f2f2f;
+    /// 输入框描边
+    pub const FIELD_BORDER: u32 = 0x3f3f3f;
+    /// 正文
+    pub const TEXT: u32 = 0xfafafa;
+    /// 次要文本
+    pub const MUTED: u32 = 0xa3a3a3;
+    /// 极弱提示文本
+    pub const FAINT: u32 = 0x757575;
+    /// 主按钮/强调
+    pub const ACCENT: u32 = 0xfafafa;
+    pub const ACCENT_HOVER: u32 = 0xffffff;
+    pub const ACCENT_ACTIVE: u32 = 0xe4e4e4;
+    pub const ACCENT_FG: u32 = 0x121212;
+    pub const OK: u32 = 0x5fbf8f;
+    pub const BUSY: u32 = 0x7aa2f7;
+
+    pub fn c(hex: u32) -> Rgba {
+        rgb(hex)
+    }
+}
+
+/// 把组件库主题对齐到参考设计的层级：窗口 → 面板 → 卡片 → 控件。
+fn apply_skin(cx: &mut App) {
+    Theme::change(ThemeMode::Dark, None, cx);
+    Theme::update(cx, |theme| {
+        theme.radius = px(8.);
+        theme.radius_lg = px(12.);
+        theme.focus_ring = false;
+        let colors = &mut theme.colors;
+        colors.background = skin::c(skin::CONTENT).into();
+        colors.foreground = skin::c(skin::TEXT).into();
+        colors.border = skin::c(skin::DIVIDER).into();
+        colors.muted = skin::c(skin::FIELD).into();
+        colors.muted_foreground = skin::c(skin::MUTED).into();
+        colors.accent = skin::c(skin::ACTIVE).into();
+        colors.accent_foreground = skin::c(skin::TEXT).into();
+        colors.title_bar = skin::c(skin::WINDOW).into();
+        colors.sidebar = skin::c(skin::PANEL).into();
+        colors.sidebar_foreground = skin::c(skin::SIDEBAR_TEXT).into();
+        colors.sidebar_accent = skin::c(skin::ACTIVE).into();
+        colors.sidebar_accent_foreground = skin::c(skin::TEXT).into();
+        colors.sidebar_border = skin::c(skin::PANEL).into();
+        colors.sidebar_primary = skin::c(skin::ACCENT).into();
+        colors.sidebar_primary_foreground = skin::c(skin::ACCENT_FG).into();
+        colors.list = skin::c(skin::CARD).into();
+        colors.list_hover = skin::c(skin::HOVER).into();
+        colors.list_active = skin::c(skin::ACTIVE).into();
+        colors.list_active_border = skin::c(skin::DIVIDER).into();
+        colors.list_head = skin::c(skin::CARD).into();
+        colors.input = skin::c(skin::FIELD_BORDER).into();
+        colors.popover = skin::c(skin::CARD).into();
+        colors.popover_foreground = skin::c(skin::TEXT).into();
+        colors.primary = skin::c(skin::ACCENT).into();
+        colors.primary_hover = skin::c(skin::ACCENT_HOVER).into();
+        colors.primary_active = skin::c(skin::ACCENT_ACTIVE).into();
+        colors.primary_foreground = skin::c(skin::ACCENT_FG).into();
+        colors.button = skin::c(skin::FIELD).into();
+        colors.button_hover = skin::c(skin::HOVER).into();
+        colors.button_active = skin::c(skin::ACTIVE).into();
+        colors.button_foreground = skin::c(skin::TEXT).into();
+        colors.button_primary = skin::c(skin::ACCENT).into();
+        colors.button_primary_hover = skin::c(skin::ACCENT_HOVER).into();
+        colors.button_primary_active = skin::c(skin::ACCENT_ACTIVE).into();
+        colors.button_primary_foreground = skin::c(skin::ACCENT_FG).into();
+        colors.button_secondary = skin::c(skin::FIELD).into();
+        colors.button_secondary_hover = skin::c(skin::HOVER).into();
+        colors.button_secondary_foreground = skin::c(skin::TEXT).into();
+        colors.ring = skin::c(skin::MUTED).into();
+        colors.selection = skin::c(skin::ACTIVE).into();
+        colors.caret = skin::c(skin::TEXT).into();
+        colors.scrollbar_thumb = skin::c(skin::ACTIVE).into();
+        colors.scrollbar_thumb_hover = skin::c(skin::MUTED).into();
+        colors.switch = skin::c(0x424242).into();
+        colors.switch_thumb = skin::c(0xe8e8e8).into();
+    });
+}
+
+#[derive(Clone)]
 struct InstanceRow {
     name: SharedString,
     version: SharedString,
@@ -86,13 +187,13 @@ pub struct LauncherUi {
 pub fn run() -> Result<(), Box<dyn Error>> {
     application().with_assets(Assets).run(|cx: &mut App| {
         gpui_component::init(cx);
-        Theme::sync_system_appearance(None, cx);
+        apply_skin(cx);
 
-        let bounds = Bounds::centered(None, size(px(1120.), px(780.)), cx);
+        let bounds = Bounds::centered(None, size(px(1180.), px(800.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitleBar::title_bar_options()),
-            ..Default::default()
+            window_min_size: Some(size(px(980.), px(640.))),
+            ..TitleBar::window_options()
         };
         cx.open_window(options, |window, cx| {
             let view = cx.new(|cx| LauncherUi::new(window, cx));
@@ -783,83 +884,252 @@ fn write_json(path: &Path, value: &Value) -> Result<(), String> {
 
 impl Render for LauncherUi {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let background = theme.background;
-        let foreground = theme.foreground;
-
         v_flex()
             .size_full()
-            .bg(background)
-            .text_color(foreground)
+            .bg(skin::c(skin::WINDOW))
+            .text_color(skin::c(skin::TEXT))
             .text_size(px(13.))
+            .child(self.render_titlebar(cx))
             .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(14.))
-                                .font_semibold()
-                                .child("lyys_mc_launcher"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(theme.muted_foreground)
-                                .child(self.status.clone()),
-                        ),
-                ),
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_sidebar(cx))
+                    .child(self.render_main(cx)),
             )
-            .child(self.render_body(cx))
-            .child(self.render_log(cx))
     }
 }
 
+/// 标题栏品牌标记：白色圆角块里的几何 L。
+fn brand_mark() -> Div {
+    div()
+        .w(px(26.))
+        .h(px(26.))
+        .rounded(px(7.))
+        .bg(skin::c(skin::APP_ICON))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            v_flex()
+                .items_start()
+                .child(div().w(px(4.)).h(px(12.)).bg(skin::c(skin::ACCENT_FG)))
+                .child(div().w(px(10.)).h(px(4.)).bg(skin::c(skin::ACCENT_FG))),
+        )
+}
+
+fn dot(color: u32, size: f32) -> Div {
+    div()
+        .w(px(size))
+        .h(px(size))
+        .rounded_full()
+        .flex_shrink_0()
+        .bg(skin::c(color))
+}
+
+/// 卡片容器：设置页里的分组单元。
+fn panel() -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .rounded(px(12.))
+        .bg(skin::c(skin::CARD))
+        .overflow_hidden()
+}
+
+/// 卡片内一行：左侧说明，右侧控件。
+fn row() -> Div {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap(px(24.))
+        .px(px(20.))
+        .py(px(14.))
+}
+
+fn row_text(title: impl Into<SharedString>, desc: impl Into<SharedString>) -> Div {
+    let title = title.into();
+    let desc = desc.into();
+    v_flex()
+        .min_w_0()
+        .gap(px(3.))
+        .child(
+            div()
+                .text_size(px(13.5))
+                .font_medium()
+                .text_color(skin::c(skin::TEXT))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(12.5))
+                .text_color(skin::c(skin::MUTED))
+                .child(desc),
+        )
+}
+
+fn sep() -> Div {
+    div().h(px(1.)).mx(px(20.)).bg(skin::c(skin::DIVIDER))
+}
+
+fn page_title(title: &'static str, subtitle: &'static str) -> Div {
+    v_flex()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(px(20.))
+                .font_semibold()
+                .text_color(skin::c(skin::TEXT))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(skin::c(skin::MUTED))
+                .child(subtitle),
+        )
+}
+
+fn primary_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    let label = label.into();
+    div()
+        .id(id)
+        .h(px(30.))
+        .px(px(12.))
+        .rounded(px(7.))
+        .flex()
+        .items_center()
+        .bg(skin::c(skin::ACCENT))
+        .text_color(skin::c(skin::ACCENT_FG))
+        .text_size(px(12.5))
+        .font_medium()
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(skin::c(skin::ACCENT_HOVER)))
+        .child(label)
+}
+
+fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    let label = label.into();
+    div()
+        .id(id)
+        .h(px(30.))
+        .px(px(10.))
+        .rounded(px(7.))
+        .flex()
+        .items_center()
+        .text_size(px(12.5))
+        .text_color(skin::c(skin::MUTED))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| {
+            style
+                .text_color(skin::c(skin::TEXT))
+                .bg(skin::c(skin::HOVER))
+        })
+        .child(label)
+}
+
 impl LauncherUi {
-    fn render_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .flex_1()
-            .flex()
-            .flex_row()
-            .min_w_0()
-            .min_h_0()
-            .bg(theme.background)
-            .child(self.render_nav(cx))
+    fn render_titlebar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let status_color = if self.busy { skin::BUSY } else { skin::OK };
+
+        TitleBar::new()
+            .bg(skin::c(skin::WINDOW))
+            .border_b_1()
+            .border_color(skin::c(skin::TITLEBAR_LINE))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .p(px(18.))
-                    .gap_3()
-                    .child(self.render_page(cx)),
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .pr_3()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(brand_mark())
+                            .child(
+                                v_flex()
+                                    .gap(px(1.))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.5))
+                                            .font_semibold()
+                                            .text_color(skin::c(skin::TEXT))
+                                            .child("LYYS"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(8.5))
+                                            .font_medium()
+                                            .text_color(skin::c(skin::MUTED))
+                                            .child("MINECRAFT LAUNCHER"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(1.))
+                                    .h(px(18.))
+                                    .mx(px(4.))
+                                    .bg(skin::c(skin::TITLEBAR_LINE)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .font_medium()
+                                    .text_color(skin::c(skin::MUTED))
+                                    .child(self.page_label()),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .child(dot(status_color, 6.))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(skin::c(skin::MUTED))
+                                    .child(self.status.clone()),
+                            ),
+                    ),
             )
     }
 
-    fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let status_color = if self.busy {
-            cx.theme().info
-        } else {
-            cx.theme().success
-        };
+    fn page_label(&self) -> SharedString {
+        match self.instance_page {
+            1 => SharedString::from("安装新实例"),
+            2 if !self.cfg_name.is_empty() => {
+                SharedString::from(format!("实例设置 · {}", self.cfg_name))
+            }
+            2 => SharedString::from("实例设置"),
+            _ => match self.tab {
+                0 => SharedString::from("实例"),
+                1 => SharedString::from("内容"),
+                _ => SharedString::from("设置"),
+            },
+        }
+    }
 
-        div()
-            .w(px(64.))
+    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .w(px(236.))
             .h_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .pt(px(16.))
-            .pb(px(16.))
-            .gap_1()
-            .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .child(self.nav_item(
+            .flex_shrink_0()
+            .bg(skin::c(skin::PANEL))
+            .px(px(12.))
+            .pt(px(6.))
+            .pb(px(14.))
+            .child(
+                h_flex().mt(px(14.)).px(px(10.)).pb(px(6.)).child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(skin::c(skin::MUTED))
+                        .child("桌面"),
+                ),
+            )
+            .child(self.side_nav(
                 "nav-instances",
                 IconName::LayoutDashboard,
                 "实例",
@@ -867,7 +1137,7 @@ impl LauncherUi {
                 0,
                 cx,
             ))
-            .child(self.nav_item(
+            .child(self.side_nav(
                 "nav-content",
                 IconName::SquareTerminal,
                 "内容",
@@ -875,7 +1145,15 @@ impl LauncherUi {
                 1,
                 cx,
             ))
-            .child(self.nav_item(
+            .child(
+                h_flex().mt(px(18.)).px(px(10.)).pb(px(6.)).child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(skin::c(skin::MUTED))
+                        .child("系统"),
+                ),
+            )
+            .child(self.side_nav(
                 "nav-settings",
                 IconName::Settings,
                 "设置",
@@ -884,11 +1162,27 @@ impl LauncherUi {
                 cx,
             ))
             .child(div().flex_1())
-            .child(div().w(px(10.)).h(px(10.)).rounded_full().bg(status_color))
+            .child(
+                v_flex()
+                    .px(px(10.))
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(skin::c(skin::FAINT))
+                            .child("Minecraft · Java 版"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(skin::c(skin::FAINT))
+                            .child(env!("CARGO_PKG_VERSION")),
+                    ),
+            )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn nav_item(
+    fn side_nav(
         &self,
         id: &'static str,
         icon: IconName,
@@ -897,24 +1191,22 @@ impl LauncherUi {
         index: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
-        let (bg, fg) = if active {
-            (theme.sidebar_accent, theme.sidebar_accent_foreground)
+        let foreground = if active {
+            skin::c(skin::TEXT)
         } else {
-            (theme.transparent, theme.sidebar_foreground)
+            skin::c(skin::SIDEBAR_TEXT)
         };
-        let hover_bg = if active { bg } else { theme.sidebar_accent };
 
-        v_flex()
+        h_flex()
             .id(id)
-            .w(px(48.))
-            .h(px(48.))
+            .w_full()
             .items_center()
-            .justify_center()
-            .rounded(px(12.))
-            .bg(bg)
-            .text_color(fg)
-            .hover(move |style| style.bg(hover_bg))
+            .gap(px(10.))
+            .h(px(36.))
+            .px(px(10.))
+            .rounded(px(7.))
+            .when(active, |this| this.bg(skin::c(skin::ACTIVE)))
+            .hover(|style| style.bg(skin::c(skin::HOVER)))
             .cursor(CursorStyle::PointingHand)
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.tab = index;
@@ -922,13 +1214,41 @@ impl LauncherUi {
                 this.content_tab = 0;
                 cx.notify();
             }))
-            .child(Icon::new(icon).with_size(px(20.)).text_color(fg))
+            .child(Icon::new(icon).with_size(px(16.)).text_color(foreground))
             .child(
                 div()
-                    .h(px(3.))
-                    .text_size(px(10.))
-                    .text_color(fg)
+                    .text_size(px(13.5))
+                    .text_color(foreground)
                     .child(label),
+            )
+    }
+
+    fn render_main(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(skin::c(skin::CONTENT))
+            .child(
+                h_flex().w_full().flex_1().min_h_0().justify_center().child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(820.))
+                        .h_full()
+                        .min_h_0()
+                        .px(px(40.))
+                        .pt(px(28.))
+                        .child(self.render_page(cx)),
+                ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .px(px(40.))
+                    .pt(px(10.))
+                    .pb(px(18.))
+                    .child(v_flex().w_full().max_w(px(820.)).child(self.render_log(cx))),
             )
     }
 
@@ -943,149 +1263,67 @@ impl LauncherUi {
             },
         }
     }
-}
 
-const VERSION_TAG_LIGHT: u32 = 0xdbeafe;
-const VERSION_TAG_DARK: u32 = 0x1e3a8a;
-const VERSION_TAG_LIGHT_FG: u32 = 0x1d4ed8;
-const VERSION_TAG_DARK_FG: u32 = 0x93c5fd;
-const LOADER_TAG_LIGHT: u32 = 0xede9fe;
-const LOADER_TAG_DARK: u32 = 0x3b0764;
-const LOADER_TAG_LIGHT_FG: u32 = 0x6d28d9;
-const LOADER_TAG_DARK_FG: u32 = 0xc4b5fd;
-const ISOLATE_TAG_LIGHT: u32 = 0xd1fae5;
-const ISOLATE_TAG_DARK: u32 = 0x064e3b;
-const ISOLATE_TAG_LIGHT_FG: u32 = 0x047857;
-const ISOLATE_TAG_DARK_FG: u32 = 0x6ee7b7;
-
-impl LauncherUi {
     fn render_instances(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let dark = theme.mode == ThemeMode::Dark;
-        let muted = theme.muted_foreground;
-        let border = theme.border;
-        let list = theme.colors.list;
+        let disabled = self.busy;
+        let mut list = panel();
 
-        let version_style = if dark {
-            (rgb(VERSION_TAG_DARK), rgb(VERSION_TAG_DARK_FG))
-        } else {
-            (rgb(VERSION_TAG_LIGHT), rgb(VERSION_TAG_LIGHT_FG))
-        };
-        let loader_style = if dark {
-            (rgb(LOADER_TAG_DARK), rgb(LOADER_TAG_DARK_FG))
-        } else {
-            (rgb(LOADER_TAG_LIGHT), rgb(LOADER_TAG_LIGHT_FG))
-        };
-        let isolate_style = if dark {
-            (rgb(ISOLATE_TAG_DARK), rgb(ISOLATE_TAG_DARK_FG))
-        } else {
-            (rgb(ISOLATE_TAG_LIGHT), rgb(ISOLATE_TAG_LIGHT_FG))
-        };
-
-        let mut rows = v_flex().gap_2();
         if self.instances.is_empty() {
-            rows = rows.child(
-                div()
-                    .py(px(32.))
-                    .text_color(muted)
-                    .child("暂无实例，可在安装页创建或在内容页导入整合包"),
+            list = list.child(
+                h_flex().w_full().justify_center().py(px(40.)).child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(skin::c(skin::FAINT))
+                        .child("暂无实例，先安装一个版本或在内容页导入整合包"),
+                ),
             );
         }
-        for row in &self.instances {
-            let launch_name = row.name.clone().to_string();
-            let folder_name = row.name.clone();
-            let settings_name = row.name.clone();
-            let disabled = self.busy;
 
-            rows = rows.child(
-                h_flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py(px(10.))
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(border)
-                    .bg(list)
-                    .child(
-                        div().min_w_0().flex_1().child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(14.))
-                                        .font_semibold()
-                                        .truncate()
-                                        .child(row.name.clone()),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(
-                                            h_flex()
-                                                .rounded(px(5.))
-                                                .px_2()
-                                                .py(px(1.))
-                                                .bg(version_style.0)
-                                                .text_color(version_style.1)
-                                                .text_size(px(11.))
-                                                .child(row.version.clone()),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .rounded(px(5.))
-                                                .px_2()
-                                                .py(px(1.))
-                                                .bg(loader_style.0)
-                                                .text_color(loader_style.1)
-                                                .text_size(px(11.))
-                                                .child(row.loader.clone()),
-                                        )
-                                        .when(row.isolated, |row| {
-                                            row.child(
-                                                h_flex()
-                                                    .rounded(px(5.))
-                                                    .px_2()
-                                                    .py(px(1.))
-                                                    .bg(isolate_style.0)
-                                                    .text_color(isolate_style.1)
-                                                    .text_size(px(11.))
-                                                    .child("隔离"),
-                                            )
-                                        }),
-                                ),
-                        ),
-                    )
-                    .child(
+        for (index, row_data) in self.instances.clone().into_iter().enumerate() {
+            let launch_name = row_data.name.to_string();
+            let launch_click = launch_name.clone();
+            let folder_name = row_data.name.clone();
+            let settings_name = row_data.name.clone();
+            let mut meta = format!("{} · {}", row_data.version, row_data.loader);
+            if row_data.isolated {
+                meta.push_str(" · 隔离");
+            }
+            if index > 0 {
+                list = list.child(sep());
+            }
+            list =
+                list.child(
+                    row().child(row_text(row_data.name.clone(), meta)).child(
                         h_flex()
-                            .gap_1()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(4.))
                             .child(
-                                Button::new(SharedString::from(format!("launch-{launch_name}")))
-                                    .primary()
-                                    .small()
-                                    .label("启动")
-                                    .disabled(disabled)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.launch_instance(&launch_name, cx)
-                                    })),
+                                primary_button(
+                                    SharedString::from(format!("launch-{launch_name}")),
+                                    "启动",
+                                )
+                                .when(disabled, |this| this.opacity(0.45))
+                                .when(!disabled, |this| {
+                                    this.on_click(cx.listener(move |this, _, _, cx| {
+                                        this.launch_instance(&launch_click, cx)
+                                    }))
+                                }),
                             )
                             .child(
-                                Button::new(SharedString::from(format!("folder-{folder_name}")))
-                                    .ghost()
-                                    .small()
-                                    .label("目录")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_folder(&folder_name, cx)
-                                    })),
+                                text_button(
+                                    SharedString::from(format!("folder-{launch_name}")),
+                                    "目录",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.open_folder(&folder_name, cx),
+                                )),
                             )
                             .child(
-                                Button::new(SharedString::from(format!(
-                                    "settings-{settings_name}"
-                                )))
-                                .ghost()
-                                .small()
-                                .label("设置")
+                                text_button(
+                                    SharedString::from(format!("settings-{launch_name}")),
+                                    "设置",
+                                )
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
                                         this.open_instance_settings(&settings_name, window, cx)
@@ -1093,38 +1331,31 @@ impl LauncherUi {
                                 )),
                             ),
                     ),
-            );
+                );
         }
 
         v_flex()
             .size_full()
-            .gap_3()
+            .gap(px(20.))
             .child(
                 h_flex()
-                    .items_center()
+                    .w_full()
+                    .items_start()
                     .justify_between()
-                    .child(div().text_size(px(18.)).font_semibold().child("实例"))
+                    .gap(px(16.))
+                    .child(page_title("实例", "管理和启动本机已安装的游戏实例"))
                     .child(
                         h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("refresh")
-                                    .ghost()
-                                    .small()
-                                    .label("刷新")
-                                    .disabled(self.busy)
-                                    .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
-                            )
-                            .child(
-                                Button::new("open-install")
-                                    .primary()
-                                    .small()
-                                    .label("安装新实例")
-                                    .disabled(self.busy)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_install(window, cx)
-                                    })),
-                            ),
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(6.))
+                            .pt(px(4.))
+                            .child(text_button("refresh", "刷新").when(!disabled, |this| {
+                                this.on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
+                            }))
+                            .child(primary_button("open-install", "安装新实例").on_click(
+                                cx.listener(|this, _, window, cx| this.open_install(window, cx)),
+                            )),
                     ),
             )
             .child(
@@ -1133,102 +1364,128 @@ impl LauncherUi {
                     .min_h_0()
                     .id("instance-list")
                     .overflow_y_scroll()
-                    .child(rows),
+                    .pb(px(6.))
+                    .child(list),
             )
     }
 
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
         let pack_active = self.content_tab == 0;
-        let mod_active = self.content_tab == 1;
 
-        let mut body = v_flex().gap_3().pt_2();
+        let mut body = v_flex().gap(px(16.));
         if pack_active {
             body = body
-                .child(self.field_row("包文件路径", &self.import_file_input, cx))
-                .child(self.field_row("实例名称", &self.import_name_input, cx))
                 .child(
-                    Checkbox::new("import-optional")
-                        .label("导入可选模组")
-                        .checked(self.import_optional)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.import_optional = *checked;
-                            cx.notify();
-                        })),
+                    panel()
+                        .child(
+                            row()
+                                .child(row_text("包文件路径", "支持 .zip 与 .mrpack 整合包文件"))
+                                .child(self.input_control(&self.import_file_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("实例名称", "留空时使用整合包内的名称"))
+                                .child(self.input_control(&self.import_name_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("导入可选模组", "同时安装作者标记为可选的模组"))
+                                .child(
+                                    Switch::new("import-optional")
+                                        .checked(self.import_optional)
+                                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                            this.import_optional = *checked;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
                 )
-                .child(
-                    h_flex().justify_end().child(
-                        Button::new("import-run")
-                            .primary()
-                            .label("导入整合包")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.import_pack(cx))),
-                    ),
-                );
-        }
-        if mod_active {
+                .child(h_flex().w_full().justify_end().child(
+                    primary_button("import-run", "导入整合包").when(!self.busy, |this| {
+                        this.on_click(cx.listener(|this, _, _, cx| this.import_pack(cx)))
+                    }),
+                ));
+        } else {
             body = body
                 .child(
-                    div()
-                        .text_color(muted)
-                        .child("搜索 Modrinth 上的模组等资源"),
+                    panel()
+                        .child(
+                            row()
+                                .child(row_text("关键词", "搜索 Modrinth 上的模组、整合包与资源包"))
+                                .child(self.input_control(&self.mod_query_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("类型", "mod / modpack / resourcepack / shader"))
+                                .child(self.input_control(&self.mod_type_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("加载器", "例如 fabric、forge、neoforge"))
+                                .child(self.input_control(&self.mod_loader_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("游戏版本", "例如 1.20.1，留空表示不限"))
+                                .child(self.input_control(&self.mod_version_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("数量", "一次返回的结果条数"))
+                                .child(self.input_control(&self.mod_limit_input)),
+                        ),
                 )
-                .child(self.field_row("关键词", &self.mod_query_input, cx))
-                .child(self.field_row("类型", &self.mod_type_input, cx))
-                .child(self.field_row("加载器", &self.mod_loader_input, cx))
-                .child(self.field_row("游戏版本", &self.mod_version_input, cx))
-                .child(self.field_row("数量", &self.mod_limit_input, cx))
+                .child(h_flex().w_full().justify_end().child(
+                    primary_button("search-run", "搜索").when(!self.busy, |this| {
+                        this.on_click(cx.listener(|this, _, _, cx| this.search_mods(cx)))
+                    }),
+                ))
                 .child(
-                    h_flex().justify_end().child(
-                        Button::new("search-run")
-                            .primary()
-                            .label("搜索")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.search_mods(cx))),
-                    ),
+                    panel()
+                        .child(
+                            row()
+                                .child(row_text("项目 slug", "Modrinth 项目页地址中的标识"))
+                                .child(self.input_control(&self.mod_slug_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("实例名称", "把资源安装到这个实例"))
+                                .child(self.input_control(&self.mod_instance_input)),
+                        ),
                 )
-                .child(div().h(px(1.)).bg(theme.border))
-                .child(div().text_color(muted).child("把项目安装到实例"))
-                .child(self.field_row("项目 slug", &self.mod_slug_input, cx))
-                .child(self.field_row("实例名称", &self.mod_instance_input, cx))
-                .child(
-                    h_flex().justify_end().child(
-                        Button::new("add-run")
-                            .primary()
-                            .label("添加到实例")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.add_mod(cx))),
-                    ),
-                );
+                .child(h_flex().w_full().justify_end().child(
+                    primary_button("add-run", "添加到实例").when(!self.busy, |this| {
+                        this.on_click(cx.listener(|this, _, _, cx| this.add_mod(cx)))
+                    }),
+                ));
         }
 
         v_flex()
             .size_full()
-            .gap_3()
+            .gap(px(20.))
             .child(
                 h_flex()
-                    .gap_1()
-                    .items_center()
+                    .w_full()
+                    .items_start()
+                    .justify_between()
+                    .gap(px(16.))
+                    .child(page_title("内容", "导入整合包、检索并安装 Modrinth 资源"))
                     .child(
-                        Button::new("tab-pack")
-                            .label("整合包")
-                            .when(pack_active, |button| button.primary())
-                            .when(!pack_active, |button| button.ghost())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.content_tab = 0;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("tab-mods")
-                            .label("模组")
-                            .when(mod_active, |button| button.primary())
-                            .when(!mod_active, |button| button.ghost())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.content_tab = 1;
-                                cx.notify();
-                            })),
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap(px(2.))
+                            .p(px(3.))
+                            .rounded(px(9.))
+                            .bg(skin::c(skin::PANEL))
+                            .child(self.segment("tab-pack", "整合包", pack_active, 0, cx))
+                            .child(self.segment("tab-mods", "模组", !pack_active, 1, cx)),
                     ),
             )
             .child(
@@ -1237,189 +1494,374 @@ impl LauncherUi {
                     .min_h_0()
                     .id("content-scroll")
                     .overflow_y_scroll()
+                    .pb(px(6.))
                     .child(body),
             )
     }
 
-    fn render_general_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    fn segment(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        active: bool,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .h(px(26.))
+            .px(px(12.))
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .text_size(px(12.5))
+            .when(active, |this| {
+                this.bg(skin::c(skin::ACTIVE))
+                    .text_color(skin::c(skin::TEXT))
+            })
+            .when(!active, |this| this.text_color(skin::c(skin::MUTED)))
+            .cursor(CursorStyle::PointingHand)
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.content_tab = index;
+                cx.notify();
+            }))
+            .child(label)
+    }
 
+    fn render_general_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
-            .gap_3()
-            .child(div().text_size(px(18.)).font_semibold().child("设置"))
+            .gap(px(20.))
+            .child(page_title("设置", "全局启动偏好，对所有实例生效"))
             .child(
-                v_flex()
-                    .gap_3()
-                    .p_4()
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.colors.list)
-                    .child(self.field_row("游戏目录", &self.dir_input, cx))
-                    .child(self.field_row("用户名", &self.username_input, cx))
-                    .child(self.field_row("内存 (MB)", &self.memory_input, cx))
-                    .child(self.field_row("Java 路径", &self.java_input, cx))
-                    .child(self.field_row("镜像地址", &self.mirror_input, cx))
-                    .child(self.field_row("Maven 仓库", &self.maven_input, cx))
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .id("settings-scroll")
+                    .overflow_y_scroll()
+                    .pb(px(6.))
                     .child(
-                        Checkbox::new("settings-isolate")
-                            .label("默认隔离运行新实例")
-                            .checked(self.isolate)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.isolate = *checked;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        h_flex().justify_end().child(
-                            Button::new("save-settings")
-                                .primary()
-                                .label("保存全局设置")
-                                .on_click(cx.listener(|this, _, _, cx| this.save_settings(cx))),
-                        ),
+                        v_flex()
+                            .gap(px(16.))
+                            .child(
+                                panel()
+                                    .child(
+                                        row()
+                                            .child(row_text(
+                                                "游戏目录",
+                                                "Minecraft 安装位置，实例从 versions 读取",
+                                            ))
+                                            .child(self.input_control(&self.dir_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("用户名", "启动游戏时使用的玩家名称"))
+                                            .child(self.input_control(&self.username_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("内存 (MB)", "分配给游戏的最大堆内存"))
+                                            .child(self.input_control(&self.memory_input)),
+                                    ),
+                            )
+                            .child(
+                                panel()
+                                    .child(
+                                        row()
+                                            .child(row_text("Java 路径", "留空时自动查找可用 Java"))
+                                            .child(self.input_control(&self.java_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text(
+                                                "镜像地址",
+                                                "替换资源下载源，留空表示官方源",
+                                            ))
+                                            .child(self.input_control(&self.mirror_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("Maven 仓库", "自定义依赖仓库地址"))
+                                            .child(self.input_control(&self.maven_input)),
+                                    ),
+                            )
+                            .child(
+                                panel().child(
+                                    row()
+                                        .child(row_text(
+                                            "默认隔离运行新实例",
+                                            "每个实例使用独立目录，避免模组互相污染",
+                                        ))
+                                        .child(
+                                            Switch::new("settings-isolate")
+                                                .checked(self.isolate)
+                                                .on_click(cx.listener(
+                                                    |this, checked: &bool, _, cx| {
+                                                        this.isolate = *checked;
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                            )
+                            .child(
+                                h_flex().w_full().justify_end().child(
+                                    primary_button("save-settings", "保存全局设置").on_click(
+                                        cx.listener(|this, _, _, cx| this.save_settings(cx)),
+                                    ),
+                                ),
+                            ),
                     ),
             )
     }
 
     fn render_install_page(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
         v_flex()
             .size_full()
-            .gap_3()
+            .gap(px(20.))
             .child(
                 h_flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_size(px(18.)).font_semibold().child("安装新实例"))
+                    .w_full()
+                    .items_start()
+                    .gap(px(10.))
                     .child(
-                        Button::new("install-back")
-                            .ghost()
-                            .small()
-                            .label("返回")
-                            .on_click(cx.listener(|this, _, _, cx| this.back_to_instances(cx))),
-                    ),
+                        h_flex()
+                            .flex_shrink_0()
+                            .pt(px(4.))
+                            .child(text_button("install-back", "←").on_click(
+                                cx.listener(|this, _, _, cx| this.back_to_instances(cx)),
+                            )),
+                    )
+                    .child(page_title("安装新实例", "选择版本与加载器，创建独立实例")),
             )
             .child(
-                v_flex()
-                    .gap_3()
-                    .p_4()
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.colors.list)
-                    .child(self.field_row("MC 版本", &self.install_version_input, cx))
-                    .child(self.field_row("实例名称", &self.install_name_input, cx))
-                    .child(self.field_row("加载器", &self.install_loader_input, cx))
-                    .child(self.field_row("加载器版本", &self.install_loader_version_input, cx))
-                    .child(self.field_row("用户名", &self.install_username_input, cx))
-                    .child(self.field_row("内存 (MB)", &self.install_memory_input, cx))
-                    .child(self.field_row("Java 路径", &self.install_java_input, cx))
-                    .child(self.field_row("镜像地址", &self.install_mirror_input, cx))
-                    .child(self.field_row("Maven 仓库", &self.install_maven_input, cx))
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .id("install-scroll")
+                    .overflow_y_scroll()
+                    .pb(px(6.))
                     .child(
-                        Checkbox::new("install-isolate")
-                            .label("隔离运行")
-                            .checked(self.install_isolate)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.install_isolate = *checked;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        h_flex().justify_end().child(
-                            Button::new("install-run")
-                                .primary()
-                                .label("开始安装")
-                                .disabled(self.busy)
-                                .on_click(cx.listener(|this, _, _, cx| this.install_version(cx))),
-                        ),
+                        v_flex()
+                            .gap(px(16.))
+                            .child(
+                                panel()
+                                    .child(
+                                        row()
+                                            .child(row_text("MC 版本", "例如 1.20.1"))
+                                            .child(self.input_control(&self.install_version_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("实例名称", "留空则使用版本号命名"))
+                                            .child(self.input_control(&self.install_name_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text(
+                                                "加载器",
+                                                "fabric / forge / neoforge / quilt",
+                                            ))
+                                            .child(self.input_control(&self.install_loader_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("加载器版本", "留空时使用最新版本"))
+                                            .child(
+                                                self.input_control(
+                                                    &self.install_loader_version_input,
+                                                ),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                panel()
+                                    .child(
+                                        row()
+                                            .child(row_text("用户名", "启动游戏时使用的玩家名称"))
+                                            .child(
+                                                self.input_control(&self.install_username_input),
+                                            ),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("内存 (MB)", "分配给游戏的最大堆内存"))
+                                            .child(self.input_control(&self.install_memory_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("Java 路径", "留空时自动查找可用 Java"))
+                                            .child(self.input_control(&self.install_java_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("镜像地址", "替换资源下载源"))
+                                            .child(self.input_control(&self.install_mirror_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("Maven 仓库", "自定义依赖仓库地址"))
+                                            .child(self.input_control(&self.install_maven_input)),
+                                    ),
+                            )
+                            .child(
+                                panel().child(
+                                    row()
+                                        .child(row_text(
+                                            "隔离运行",
+                                            "实例使用独立目录，模组与存档互不影响",
+                                        ))
+                                        .child(
+                                            Switch::new("install-isolate")
+                                                .checked(self.install_isolate)
+                                                .on_click(cx.listener(
+                                                    |this, checked: &bool, _, cx| {
+                                                        this.install_isolate = *checked;
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                            )
+                            .child(h_flex().w_full().justify_end().child(
+                                primary_button("install-run", "开始安装").when(
+                                    !self.busy,
+                                    |this| {
+                                        this.on_click(
+                                            cx.listener(|this, _, _, cx| this.install_version(cx)),
+                                        )
+                                    },
+                                ),
+                            )),
                     ),
             )
     }
 
     fn render_instance_settings_page(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
         v_flex()
             .size_full()
-            .gap_3()
+            .gap(px(20.))
             .child(
                 h_flex()
-                    .items_center()
-                    .justify_between()
+                    .w_full()
+                    .items_start()
+                    .gap(px(10.))
                     .child(
-                        div()
-                            .text_size(px(18.))
-                            .font_semibold()
-                            .child(format!("实例设置: {}", self.cfg_name)),
+                        h_flex()
+                            .flex_shrink_0()
+                            .pt(px(4.))
+                            .child(text_button("cfg-back", "←").on_click(
+                                cx.listener(|this, _, _, cx| this.back_to_instances(cx)),
+                            )),
                     )
-                    .child(
-                        Button::new("cfg-back")
-                            .ghost()
-                            .small()
-                            .label("返回")
-                            .on_click(cx.listener(|this, _, _, cx| this.back_to_instances(cx))),
-                    ),
+                    .child(page_title("实例设置", "这里的修改只对当前实例生效")),
             )
             .child(
-                v_flex()
-                    .gap_3()
-                    .p_4()
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.colors.list)
-                    .child(self.field_row("用户名", &self.cfg_username_input, cx))
-                    .child(self.field_row("内存 (MB)", &self.cfg_memory_input, cx))
-                    .child(self.field_row("Java 路径", &self.cfg_java_input, cx))
-                    .child(self.field_row("镜像地址", &self.cfg_mirror_input, cx))
-                    .child(self.field_row("Maven 仓库", &self.cfg_maven_input, cx))
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .id("cfg-scroll")
+                    .overflow_y_scroll()
+                    .pb(px(6.))
                     .child(
-                        Checkbox::new("cfg-isolate")
-                            .label("隔离运行")
-                            .checked(self.cfg_isolate)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.cfg_isolate = *checked;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        h_flex().justify_end().child(
-                            Button::new("cfg-save")
-                                .primary()
-                                .label("保存实例设置")
-                                .on_click(
+                        v_flex()
+                            .gap(px(16.))
+                            .child(
+                                panel()
+                                    .child(
+                                        row().child(row_text("实例", self.cfg_name.clone())).child(
+                                            div()
+                                                .text_size(px(12.5))
+                                                .text_color(skin::c(skin::MUTED))
+                                                .child("覆盖全局设置"),
+                                        ),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("用户名", "启动游戏时使用的玩家名称"))
+                                            .child(self.input_control(&self.cfg_username_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("内存 (MB)", "分配给游戏的最大堆内存"))
+                                            .child(self.input_control(&self.cfg_memory_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("Java 路径", "留空时使用全局设置"))
+                                            .child(self.input_control(&self.cfg_java_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("镜像地址", "留空时使用全局设置"))
+                                            .child(self.input_control(&self.cfg_mirror_input)),
+                                    )
+                                    .child(sep())
+                                    .child(
+                                        row()
+                                            .child(row_text("Maven 仓库", "留空时使用全局设置"))
+                                            .child(self.input_control(&self.cfg_maven_input)),
+                                    ),
+                            )
+                            .child(
+                                panel().child(
+                                    row()
+                                        .child(row_text(
+                                            "隔离运行",
+                                            "实例使用独立目录，模组与存档互不影响",
+                                        ))
+                                        .child(
+                                            Switch::new("cfg-isolate")
+                                                .checked(self.cfg_isolate)
+                                                .on_click(cx.listener(
+                                                    |this, checked: &bool, _, cx| {
+                                                        this.cfg_isolate = *checked;
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                            )
+                            .child(h_flex().w_full().justify_end().child(
+                                primary_button("cfg-save", "保存实例设置").on_click(
                                     cx.listener(|this, _, _, cx| this.save_instance_settings(cx)),
                                 ),
-                        ),
+                            )),
                     ),
             )
     }
 
-    fn field_row(
-        &self,
-        label: &'static str,
-        state: &Entity<input::InputState>,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        h_flex()
-            .items_center()
-            .gap_3()
-            .child(
-                div()
-                    .w(px(110.))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(label),
-            )
-            .child(input::Input::new(state).flex_1().small())
+    fn input_control(&self, state: &Entity<input::InputState>) -> impl IntoElement {
+        input::Input::new(state)
+            .w(px(280.))
+            .flex_shrink_0()
+            .small()
+            .bg(skin::c(skin::FIELD))
+            .border_1()
+            .border_color(skin::c(skin::FIELD_BORDER))
+            .rounded(px(8.))
+            .text_size(px(12.5))
     }
 
     fn render_log(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let mono = cx.theme().mono_font_family.clone();
         let summary = self.log_summary.clone();
+        let status_color = if self.busy { skin::BUSY } else { skin::FAINT };
 
         if self.log_follow {
             self.log_follow = false;
@@ -1427,41 +1869,44 @@ impl LauncherUi {
         }
 
         v_flex()
-            .mx_2()
-            .mb_2()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.colors.list)
+            .w_full()
+            .rounded(px(12.))
+            .bg(skin::c(skin::CARD))
             .overflow_hidden()
             .child(
                 h_flex()
+                    .w_full()
                     .items_center()
                     .justify_between()
-                    .px_3()
-                    .py(px(6.))
+                    .gap(px(16.))
+                    .px(px(20.))
+                    .py(px(10.))
                     .child(
-                        div()
+                        h_flex()
                             .min_w_0()
                             .flex_1()
-                            .truncate()
-                            .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
-                            .child(if summary.is_empty() {
-                                SharedString::from("日志")
-                            } else {
-                                summary
-                            }),
+                            .items_center()
+                            .gap(px(8.))
+                            .child(dot(status_color, 6.))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(12.5))
+                                    .text_color(skin::c(skin::TEXT))
+                                    .child("日志"),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(skin::c(skin::FAINT))
+                                    .child(summary),
+                            ),
                     )
                     .child(
-                        Button::new("log-toggle")
-                            .ghost()
-                            .xsmall()
-                            .label(if self.log_open {
-                                "收起日志"
-                            } else {
-                                "展开日志"
-                            })
+                        text_button("log-toggle", if self.log_open { "收起" } else { "展开" })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.log_open = !this.log_open;
                                 this.log_follow = true;
@@ -1470,28 +1915,25 @@ impl LauncherUi {
                     ),
             )
             .when(self.log_open, |panel| {
-                panel.child(
+                panel.child(sep()).child(
                     div()
                         .id("log-scroll")
-                        .h(px(200.))
+                        .h(px(160.))
+                        .px(px(20.))
+                        .py(px(12.))
                         .overflow_y_scroll()
                         .track_scroll(&self.log_scroll)
-                        .p_3()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_size(px(11.))
-                        .child(
-                            div()
-                                .flex_col()
-                                .gap_1()
-                                .children(if self.log_text.is_empty() {
-                                    vec![SharedString::from("尚未运行任务")]
-                                } else {
-                                    self.log_text
-                                        .lines()
-                                        .map(|line| SharedString::from(line.to_string()))
-                                        .collect::<Vec<_>>()
-                                }),
-                        ),
+                        .font_family(mono)
+                        .text_size(px(11.5))
+                        .text_color(skin::c(skin::MUTED))
+                        .child(v_flex().gap(px(3.)).children(if self.log_text.is_empty() {
+                            vec![SharedString::from("尚未运行任务")]
+                        } else {
+                            self.log_text
+                                .lines()
+                                .map(|line| SharedString::from(line.to_string()))
+                                .collect::<Vec<_>>()
+                        })),
                 )
             })
     }
