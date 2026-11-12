@@ -215,6 +215,10 @@ pub fn download_all(mut tasks: Vec<FileTask>, origins: &Origins) -> Result<(), S
                     }
 
                     progress.files_done.fetch_add(1, Ordering::SeqCst);
+                    if std::env::var_os("LYYS_GUI").is_some() {
+                        let done = progress.files_done.load(Ordering::Relaxed);
+                        println!("#progress {done}/{total}");
+                    }
                 }
             }));
         }

@@ -1,7 +1,13 @@
+use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, CursorStyle, Div, ElementId, Entity, IntoElement,
@@ -43,6 +49,10 @@ mod skin {
     pub const ACCENT_ACTIVE: u32 = 0xe4e4e4;
     pub const ACCENT_FG: u32 = 0x121212;
     pub const BUSY: u32 = 0x7aa2f7;
+    pub const OK: u32 = 0x4ade80;
+    pub const DANGER: u32 = 0x7f1d1d;
+    pub const DANGER_HOVER: u32 = 0x991b1b;
+    pub const DANGER_FG: u32 = 0xfecaca;
 
     pub fn c(hex: u32) -> Rgba {
         rgb(hex)
@@ -104,6 +114,36 @@ fn apply_skin(cx: &mut App) {
     });
 }
 
+struct TaskHandle {
+    child: Mutex<Option<std::process::Child>>,
+    cancelled: AtomicBool,
+}
+
+enum TaskEvent {
+    Log(String),
+    Progress { done: usize, total: usize },
+    Done(bool),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskState {
+    Running,
+    Success,
+    Failed,
+    Cancelled,
+}
+
+struct TaskEntry {
+    id: usize,
+    title: SharedString,
+    instance: Option<SharedString>,
+    state: TaskState,
+    progress: Option<f32>,
+    log_lines: VecDeque<SharedString>,
+    last_log_notify: Instant,
+    handle: Arc<TaskHandle>,
+}
+
 #[derive(Clone)]
 struct InstanceRow {
     name: SharedString,
@@ -117,13 +157,11 @@ pub struct LauncherUi {
     instance_page: usize,
     download_tab: usize,
     instances: Vec<InstanceRow>,
-    busy: bool,
-    status: SharedString,
-    log_text: SharedString,
-    log_summary: SharedString,
-    log_open: bool,
-    log_follow: bool,
-    log_scroll: ScrollHandle,
+    tasks: Vec<TaskEntry>,
+    active_task: Option<usize>,
+    next_task_id: usize,
+    task_log_scroll: ScrollHandle,
+    task_log_follow: bool,
 
     dir_input: Entity<input::InputState>,
     username_input: Entity<input::InputState>,
@@ -200,13 +238,11 @@ impl LauncherUi {
             instance_page: 0,
             download_tab: 0,
             instances: Vec::new(),
-            busy: false,
-            status: SharedString::from("就绪"),
-            log_text: SharedString::default(),
-            log_summary: SharedString::default(),
-            log_open: false,
-            log_follow: false,
-            log_scroll: ScrollHandle::new(),
+            tasks: Vec::new(),
+            active_task: None,
+            next_task_id: 1,
+            task_log_scroll: ScrollHandle::new(),
+            task_log_follow: false,
 
             dir_input: input(window, &settings.game_dir, cx),
             username_input: input(window, &settings.username, cx),
@@ -278,67 +314,127 @@ impl LauncherUi {
         cx.notify();
     }
 
-    fn push_log(&mut self, line: String, cx: &mut Context<Self>) {
-        self.log_summary = SharedString::from(line.clone());
-        self.log_follow = true;
-        let mut text = self.log_text.to_string();
-        text.push_str(&line);
-        text.push('\n');
-        if text.chars().count() > 200_000 {
-            let skip = text.chars().count() - 200_000;
-            text = text.chars().skip(skip).collect();
+    fn push_task_log(&mut self, id: usize, line: String, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks.iter_mut().find(|task| task.id == id) else {
+            return;
+        };
+        task.log_lines.push_back(SharedString::from(line));
+        while task.log_lines.len() > 2_000 {
+            task.log_lines.pop_front();
         }
-        self.log_text = SharedString::from(text);
-        cx.notify();
+        let now = Instant::now();
+        if now.duration_since(task.last_log_notify) >= Duration::from_millis(50) {
+            task.last_log_notify = now;
+            self.task_log_follow = true;
+            cx.notify();
+        }
     }
 
-    fn run_task(
+    fn running_task_for(&self, name: &str) -> Option<usize> {
+        self.tasks
+            .iter()
+            .find(|task| {
+                task.state == TaskState::Running && task.instance.as_deref() == Some(name)
+            })
+            .map(|task| task.id)
+    }
+
+    fn start_task(
         &mut self,
+        title: SharedString,
+        instance: Option<SharedString>,
         args: Vec<String>,
         refresh: bool,
         save: Option<(String, String, LaunchConfig)>,
         cx: &mut Context<Self>,
     ) {
-        if self.busy {
-            self.status = SharedString::from("已有任务正在运行");
-            cx.notify();
-            return;
-        }
         let exe = match std::env::current_exe() {
             Ok(path) => path,
-            Err(error) => {
-                self.status = SharedString::from(format!("无法定位可执行文件: {error}"));
-                cx.notify();
-                return;
-            }
+            Err(_) => return,
         };
-        self.busy = true;
-        self.log_open = true;
-        self.log_follow = true;
-        self.status = SharedString::from("运行中");
+        let id = self.next_task_id;
+        self.next_task_id += 1;
+        let handle = Arc::new(TaskHandle {
+            child: Mutex::new(None),
+            cancelled: AtomicBool::new(false),
+        });
+        self.tasks.push(TaskEntry {
+            id,
+            title,
+            instance,
+            state: TaskState::Running,
+            progress: None,
+            log_lines: VecDeque::new(),
+            last_log_notify: Instant::now(),
+            handle: handle.clone(),
+        });
+        if self.active_task.is_none() {
+            self.active_task = Some(id);
+        }
+        self.task_log_follow = true;
         cx.notify();
 
-        let (line_tx, line_rx) = channel::unbounded::<String>();
-        let (done_tx, done_rx) = channel::bounded::<bool>(1);
+        let (event_tx, event_rx) = channel::unbounded::<TaskEvent>();
         std::thread::spawn(move || {
-            let success = execute(exe, args, line_tx);
-            let _ = done_tx.send_blocking(success);
+            execute(exe, args, event_tx, handle);
         });
 
         cx.spawn(async move |weak, cx| {
-            while let Ok(line) = line_rx.recv().await {
-                weak.update(cx, |this, cx| this.push_log(line, cx)).ok();
+            let mut success = false;
+            while let Ok(event) = event_rx.recv().await {
+                let stop = match event {
+                    TaskEvent::Log(line) => {
+                        weak.update(cx, |this, cx| this.push_task_log(id, line, cx))
+                            .ok();
+                        false
+                    }
+                    TaskEvent::Progress { done, total } => {
+                        weak.update(cx, |this, cx| {
+                            let value = if total == 0 {
+                                0.0
+                            } else {
+                                done as f32 / total as f32
+                            };
+                            if let Some(task) = this.tasks.iter_mut().find(|task| task.id == id) {
+                                task.progress = Some(value.clamp(0.0, 1.0));
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                        false
+                    }
+                    TaskEvent::Done(ok) => {
+                        success = ok;
+                        true
+                    }
+                };
+                if stop {
+                    break;
+                }
             }
-            let success = done_rx.recv().await.unwrap_or(false);
             weak.update(cx, |this, cx| {
-                this.busy = false;
-                this.status = SharedString::from(if success { "完成" } else { "失败" });
+                let cancelled = this
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == id)
+                    .map(|task| task.handle.cancelled.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+                if let Some(task) = this.tasks.iter_mut().find(|task| task.id == id) {
+                    task.state = if cancelled {
+                        TaskState::Cancelled
+                    } else if success {
+                        TaskState::Success
+                    } else {
+                        TaskState::Failed
+                    };
+                    task.progress = None;
+                }
                 if success
                     && let Some((dir, name, config)) = save
                     && let Err(error) = instance::write_launch_config(&dir, &name, &config)
                 {
                     let text = format!("保存实例设置失败: {error}");
-                    this.push_log(text, cx);
+                    this.push_task_log(id, text, cx);
                 }
                 if refresh {
                     this.reload(cx);
@@ -348,6 +444,20 @@ impl LauncherUi {
             .ok();
         })
         .detach();
+    }
+
+    fn cancel_task(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks.iter().find(|task| task.id == id) else {
+            return;
+        };
+        if task.state != TaskState::Running {
+            return;
+        }
+        task.handle.cancelled.store(true, Ordering::SeqCst);
+        if let Some(child) = task.handle.child.lock().unwrap().take() {
+            std::thread::spawn(move || kill_tree(child));
+        }
+        cx.notify();
     }
 
     fn effective_launch(&self, name: &str, cx: &Context<Self>) -> (String, LaunchParams) {
@@ -375,9 +485,13 @@ impl LauncherUi {
     }
 
     fn launch_instance(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(id) = self.running_task_for(name) {
+            self.active_task = Some(id);
+            cx.notify();
+            return;
+        }
         let (dir, params) = self.effective_launch(name, cx);
         if dir.is_empty() {
-            self.status = SharedString::from("请先设置游戏目录");
             cx.notify();
             return;
         }
@@ -399,22 +513,24 @@ impl LauncherUi {
         push_option(&mut args, "--mirror", &params.mirror);
         push_option(&mut args, "--maven", &params.maven);
 
-        self.status = SharedString::from(format!("启动 {name}"));
-        self.run_task(args, false, None, cx);
+        self.start_task(
+            SharedString::from(format!("启动 {name}")),
+            Some(SharedString::from(name)),
+            args,
+            false,
+            None,
+            cx,
+        );
     }
 
     fn open_folder(&mut self, name: &str, cx: &mut Context<Self>) {
         let dir = Self::value(&self.dir_input, cx);
         let path = Path::new(&dir).join("versions").join(name);
         if !path.is_dir() {
-            self.status = SharedString::from("实例目录不存在");
             cx.notify();
             return;
         }
-        match Command::new("explorer").arg(path).spawn() {
-            Ok(_) => self.status = SharedString::from("已打开实例目录"),
-            Err(error) => self.status = SharedString::from(format!("打开目录失败: {error}")),
-        }
+        let _ = Command::new("explorer").arg(path).spawn();
         cx.notify();
     }
 
@@ -426,14 +542,10 @@ impl LauncherUi {
     fn install_version(&mut self, cx: &mut Context<Self>) {
         let dir = Self::value(&self.dir_input, cx);
         if dir.is_empty() {
-            self.status = SharedString::from("请先设置游戏目录");
-            cx.notify();
             return;
         }
         let version = Self::value(&self.install_version_input, cx);
         if version.is_empty() {
-            self.status = SharedString::from("请填写实例版本");
-            cx.notify();
             return;
         }
         let name = Self::value(&self.install_name_input, cx);
@@ -450,7 +562,7 @@ impl LauncherUi {
             String::from("--dir"),
             dir.clone(),
             String::from("--version"),
-            version,
+            version.clone(),
         ];
         push_option(&mut args, "--name", &name);
         push_option(&mut args, "--loader", &loader);
@@ -459,6 +571,7 @@ impl LauncherUi {
         push_option(&mut args, "--mirror", &mirror);
         push_option(&mut args, "--maven", &maven);
 
+        let instance = (!name.is_empty()).then(|| SharedString::from(name.clone()));
         let save = if name.is_empty() {
             None
         } else {
@@ -475,20 +588,23 @@ impl LauncherUi {
                 },
             ))
         };
-        self.run_task(args, true, save, cx);
+        self.start_task(
+            SharedString::from(format!("安装 {version}")),
+            instance,
+            args,
+            true,
+            save,
+            cx,
+        );
     }
 
     fn import_pack(&mut self, cx: &mut Context<Self>) {
         let dir = Self::value(&self.dir_input, cx);
         if dir.is_empty() {
-            self.status = SharedString::from("请先设置游戏目录");
-            cx.notify();
             return;
         }
         let file = Self::value(&self.import_file_input, cx);
         if file.is_empty() {
-            self.status = SharedString::from("请填写整合包文件路径");
-            cx.notify();
             return;
         }
         let name = Self::value(&self.import_name_input, cx);
@@ -511,20 +627,24 @@ impl LauncherUi {
             args.push(String::from("--with-optional"));
         }
 
-        self.run_task(args, true, None, cx);
+        let instance = (!name.is_empty()).then(|| SharedString::from(name.clone()));
+        self.start_task(
+            SharedString::from("导入整合包"),
+            instance,
+            args,
+            true,
+            None,
+            cx,
+        );
     }
 
     fn import_modrinth(&mut self, cx: &mut Context<Self>) {
         let dir = Self::value(&self.dir_input, cx);
         if dir.is_empty() {
-            self.status = SharedString::from("请先设置游戏目录");
-            cx.notify();
             return;
         }
         let slug = Self::value(&self.mod_slug_input, cx);
         if slug.is_empty() {
-            self.status = SharedString::from("请填写整合包项目 slug");
-            cx.notify();
             return;
         }
         let name = Self::value(&self.import_name_input, cx);
@@ -547,7 +667,15 @@ impl LauncherUi {
             args.push(String::from("--with-optional"));
         }
 
-        self.run_task(args, true, None, cx);
+        let instance = (!name.is_empty()).then(|| SharedString::from(name.clone()));
+        self.start_task(
+            SharedString::from("导入整合包"),
+            instance,
+            args,
+            true,
+            None,
+            cx,
+        );
     }
 
     fn search_type(&self) -> &'static str {
@@ -563,20 +691,16 @@ impl LauncherUi {
     fn search_mods(&mut self, cx: &mut Context<Self>) {
         let query = Self::value(&self.mod_query_input, cx);
         if query.is_empty() {
-            self.status = SharedString::from("请填写搜索关键词");
-            cx.notify();
             return;
         }
         let limit = Self::value(&self.mod_limit_input, cx);
         if limit.is_empty() {
-            self.status = SharedString::from("数量不能为空");
-            cx.notify();
             return;
         }
         let mut args = vec![
             String::from("search"),
             String::from("--query"),
-            query,
+            query.clone(),
             String::from("--type"),
             String::from(self.search_type()),
             String::from("--limit"),
@@ -589,7 +713,14 @@ impl LauncherUi {
         let version = Self::value(&self.mod_version_input, cx);
         push_option(&mut args, "--version", &version);
 
-        self.run_task(args, false, None, cx);
+        self.start_task(
+            SharedString::from(format!("搜索 {query}")),
+            None,
+            args,
+            false,
+            None,
+            cx,
+        );
     }
 
     fn add_mod(&mut self, cx: &mut Context<Self>) {
@@ -597,8 +728,6 @@ impl LauncherUi {
         let name = Self::value(&self.mod_instance_input, cx);
         let slug = Self::value(&self.mod_slug_input, cx);
         if dir.is_empty() || name.is_empty() || slug.is_empty() {
-            self.status = SharedString::from("请填写游戏目录、实例名和项目");
-            cx.notify();
             return;
         }
         let args = vec![
@@ -606,20 +735,25 @@ impl LauncherUi {
             String::from("--dir"),
             dir,
             String::from("--name"),
-            name,
+            name.clone(),
             String::from("--slug"),
-            slug,
+            slug.clone(),
             String::from("--type"),
             String::from(self.search_type()),
         ];
-        self.run_task(args, false, None, cx);
+        self.start_task(
+            SharedString::from(format!("添加 {slug}")),
+            Some(SharedString::from(name)),
+            args,
+            false,
+            None,
+            cx,
+        );
     }
 
     fn open_instance_settings(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let dir = Self::value(&self.dir_input, cx);
         if dir.is_empty() {
-            self.status = SharedString::from("请先设置游戏目录");
-            cx.notify();
             return;
         }
         let config = instance::read_launch_config(&dir, name);
@@ -656,13 +790,9 @@ impl LauncherUi {
         let dir = Self::value(&self.dir_input, cx);
         let name = self.cfg_name.to_string();
         if dir.is_empty() || name.is_empty() {
-            self.status = SharedString::from("实例或游戏目录为空");
-            cx.notify();
             return;
         }
         if Self::value(&self.cfg_memory_input, cx).is_empty() {
-            self.status = SharedString::from("内存不能为空");
-            cx.notify();
             return;
         }
         let config = LaunchConfig {
@@ -673,18 +803,13 @@ impl LauncherUi {
             maven: Some(Self::value(&self.cfg_maven_input, cx)),
             isolate: Some(self.cfg_isolate),
         };
-        match instance::write_launch_config(&dir, &name, &config) {
-            Ok(()) => self.status = SharedString::from("实例设置已保存"),
-            Err(error) => self.status = SharedString::from(error),
-        }
+        let _ = instance::write_launch_config(&dir, &name, &config);
         self.reload(cx);
     }
 
     fn save_settings(&mut self, cx: &mut Context<Self>) {
         let memory = self.memory_value(&self.memory_input, cx);
         if Self::value(&self.memory_input, cx).is_empty() {
-            self.status = SharedString::from("内存不能为空");
-            cx.notify();
             return;
         }
         let value = json!({
@@ -697,10 +822,7 @@ impl LauncherUi {
             "isolate": self.isolate,
         });
         let path = config_path();
-        match write_json(&path, &value) {
-            Ok(()) => self.status = SharedString::from("全局设置已保存"),
-            Err(error) => self.status = SharedString::from(error),
-        }
+        let _ = write_json(&path, &value);
         self.reload(cx);
     }
 }
@@ -725,14 +847,35 @@ fn input(
     })
 }
 
-fn execute(exe: PathBuf, args: Vec<String>, tx: channel::Sender<String>) -> bool {
+fn kill_tree(mut child: std::process::Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let _ = Command::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn execute(
+    exe: PathBuf,
+    args: Vec<String>,
+    tx: channel::Sender<TaskEvent>,
+    task: Arc<TaskHandle>,
+) -> bool {
     let child = Command::new(exe)
         .args(&args)
+        .env("LYYS_GUI", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
     let Ok(mut child) = child else {
-        let _ = tx.send_blocking(String::from("启动任务失败"));
+        let _ = tx.send_blocking(TaskEvent::Log(String::from("启动任务失败")));
+        let _ = tx.send_blocking(TaskEvent::Done(false));
         return false;
     };
 
@@ -745,21 +888,53 @@ fn execute(exe: PathBuf, args: Vec<String>, tx: channel::Sender<String>) -> bool
         std::thread::spawn(move || pump(stderr, tx));
     }
 
-    let status = child.wait();
-    match status {
-        Ok(status) => {
-            let success = status.success();
-            let _ = tx.send_blocking(format!("任务退出: {status}"));
-            success
-        }
-        Err(error) => {
-            let _ = tx.send_blocking(format!("等待任务失败: {error}"));
-            false
+    {
+        let Ok(mut slot) = task.child.lock() else {
+            let _ = tx.send_blocking(TaskEvent::Done(false));
+            return false;
+        };
+        *slot = Some(child);
+    }
+
+    loop {
+        let state = {
+            let Ok(mut slot) = task.child.lock() else {
+                let _ = tx.send_blocking(TaskEvent::Done(false));
+                return false;
+            };
+            match slot.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => Some(Ok(status)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                },
+                None => Some(Err(std::io::Error::other("cancelled"))),
+            }
+        };
+
+        match state {
+            None => std::thread::sleep(Duration::from_millis(100)),
+            Some(Ok(status)) => {
+                let success = status.success();
+                let _ = tx.send_blocking(TaskEvent::Log(format!("任务退出: {status}")));
+                let _ = tx.send_blocking(TaskEvent::Done(success));
+                return success;
+            }
+            Some(Err(error)) => {
+                let message = if task.cancelled.load(Ordering::SeqCst) {
+                    String::from("任务已取消")
+                } else {
+                    format!("等待任务失败: {error}")
+                };
+                let _ = tx.send_blocking(TaskEvent::Log(message));
+                let _ = tx.send_blocking(TaskEvent::Done(false));
+                return false;
+            }
         }
     }
 }
 
-fn pump<R: Read + Send + 'static>(reader: R, tx: channel::Sender<String>) {
+fn pump<R: Read + Send + 'static>(reader: R, tx: channel::Sender<TaskEvent>) {
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     loop {
@@ -773,7 +948,22 @@ fn pump<R: Read + Send + 'static>(reader: R, tx: channel::Sender<String>) {
                         line.pop();
                     }
                 }
-                if !line.is_empty() && tx.send_blocking(line.clone()).is_err() {
+                if line.is_empty() {
+                    continue;
+                }
+                let event = match line.strip_prefix("#progress ") {
+                    Some(rest) => rest
+                        .split_once('/')
+                        .and_then(|(done, total)| {
+                            Some(TaskEvent::Progress {
+                                done: done.trim().parse().ok()?,
+                                total: total.trim().parse().ok()?,
+                            })
+                        })
+                        .unwrap_or_else(|| TaskEvent::Log(line.clone())),
+                    None => TaskEvent::Log(line.clone()),
+                };
+                if tx.send_blocking(event).is_err() {
                     break;
                 }
             }
@@ -1019,12 +1209,64 @@ fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stat
         .child(label)
 }
 
+fn danger_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    let label = label.into();
+    div()
+        .id(id)
+        .h(px(30.))
+        .px(px(12.))
+        .rounded(px(7.))
+        .flex()
+        .items_center()
+        .bg(skin::c(skin::DANGER))
+        .text_color(skin::c(skin::DANGER_FG))
+        .text_size(px(12.5))
+        .font_medium()
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(skin::c(skin::DANGER_HOVER)))
+        .child(label)
+}
+
 impl LauncherUi {
-    fn render_titlebar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_titlebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let running = self
+            .tasks
+            .iter()
+            .filter(|task| task.state == TaskState::Running)
+            .count();
+        let mut button = text_button("nav-tasks", "任务").on_click(cx.listener(
+            |this, _, _, cx| {
+                this.tab = 3;
+                this.instance_page = 0;
+                cx.notify();
+            },
+        ));
+        if running > 0 {
+            button = button.child(
+                div()
+                    .ml(px(6.))
+                    .px(px(6.))
+                    .h(px(16.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .bg(skin::c(skin::BUSY))
+                    .text_size(px(10.5))
+                    .text_color(skin::c(skin::WINDOW))
+                    .child(running.to_string()),
+            );
+        }
         TitleBar::new()
             .bg(skin::c(skin::WINDOW))
             .border_b_1()
             .border_color(skin::c(skin::TITLEBAR_LINE))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .pr(px(8.))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(button),
+            )
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1139,15 +1381,6 @@ impl LauncherUi {
                         .child(self.render_page(cx)),
                 ),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_center()
-                    .px(px(40.))
-                    .pt(px(10.))
-                    .pb(px(18.))
-                    .child(v_flex().w_full().max_w(px(820.)).child(self.render_log(cx))),
-            )
     }
 
     fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1156,13 +1389,13 @@ impl LauncherUi {
             _ => match self.tab {
                 0 => self.render_instances(cx).into_any_element(),
                 1 => self.render_download(cx).into_any_element(),
+                3 => self.render_tasks(cx).into_any_element(),
                 _ => self.render_general_settings(cx).into_any_element(),
             },
         }
     }
 
     fn render_instances(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let disabled = self.busy;
         let mut list = panel();
 
         if self.instances.is_empty() {
@@ -1188,6 +1421,7 @@ impl LauncherUi {
             if index > 0 {
                 list = list.child(sep());
             }
+            let running = self.running_task_for(&launch_name);
             list =
                 list.child(
                     row().child(row_text(row_data.name.clone(), meta)).child(
@@ -1195,18 +1429,25 @@ impl LauncherUi {
                             .flex_shrink_0()
                             .items_center()
                             .gap(px(4.))
-                            .child(
+                            .child(if let Some(task_id) = running {
+                                danger_button(
+                                    SharedString::from(format!("cancel-{launch_name}")),
+                                    "取消",
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.cancel_task(task_id, cx)
+                                }))
+                                .into_any_element()
+                            } else {
                                 primary_button(
                                     SharedString::from(format!("launch-{launch_name}")),
                                     "启动",
                                 )
-                                .when(disabled, |this| this.opacity(0.45))
-                                .when(!disabled, |this| {
-                                    this.on_click(cx.listener(move |this, _, _, cx| {
-                                        this.launch_instance(&launch_click, cx)
-                                    }))
-                                }),
-                            )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.launch_instance(&launch_click, cx)
+                                }))
+                                .into_any_element()
+                            })
                             .child(
                                 text_button(
                                     SharedString::from(format!("folder-{launch_name}")),
@@ -1247,9 +1488,9 @@ impl LauncherUi {
                             .items_center()
                             .gap(px(6.))
                             .pt(px(4.))
-                            .child(text_button("refresh", "刷新").when(!disabled, |this| {
-                                this.on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
-                            })),
+                            .child(text_button("refresh", "刷新").on_click(
+                                cx.listener(|this, _, _, cx| this.reload(cx)),
+                            )),
                     ),
             )
             .child(
@@ -1297,9 +1538,9 @@ impl LauncherUi {
                         ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("import-run", "导入整合包").when(!self.busy, |this| {
-                        this.on_click(cx.listener(|this, _, _, cx| this.import_pack(cx)))
-                    }),
+                    primary_button("import-run", "导入整合包").on_click(
+                        cx.listener(|this, _, _, cx| this.import_pack(cx)),
+                    ),
                 ))
                 .child(
                     panel()
@@ -1322,9 +1563,9 @@ impl LauncherUi {
                         ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("pack-search-run", "搜索整合包").when(!self.busy, |this| {
-                        this.on_click(cx.listener(|this, _, _, cx| this.search_mods(cx)))
-                    }),
+                    primary_button("pack-search-run", "搜索整合包").on_click(
+                        cx.listener(|this, _, _, cx| this.search_mods(cx)),
+                    ),
                 ))
                 .child(
                     panel().child(
@@ -1334,11 +1575,8 @@ impl LauncherUi {
                     ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("pack-import-run", "从 Modrinth 导入").when(
-                        !self.busy,
-                        |this| {
-                            this.on_click(cx.listener(|this, _, _, cx| this.import_modrinth(cx)))
-                        },
+                    primary_button("pack-import-run", "从 Modrinth 导入").on_click(
+                        cx.listener(|this, _, _, cx| this.import_modrinth(cx)),
                     ),
                 ));
         } else {
@@ -1370,9 +1608,9 @@ impl LauncherUi {
                         ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("search-run", "搜索").when(!self.busy, |this| {
-                        this.on_click(cx.listener(|this, _, _, cx| this.search_mods(cx)))
-                    }),
+                    primary_button("search-run", "搜索").on_click(
+                        cx.listener(|this, _, _, cx| this.search_mods(cx)),
+                    ),
                 ))
                 .child(
                     panel()
@@ -1389,9 +1627,9 @@ impl LauncherUi {
                         ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("add-run", "添加到实例").when(!self.busy, |this| {
-                        this.on_click(cx.listener(|this, _, _, cx| this.add_mod(cx)))
-                    }),
+                    primary_button("add-run", "添加到实例").on_click(
+                        cx.listener(|this, _, _, cx| this.add_mod(cx)),
+                    ),
                 ));
         }
 
@@ -1657,9 +1895,9 @@ impl LauncherUi {
                 ),
             )
             .child(h_flex().w_full().justify_end().child(
-                primary_button("install-run", "开始安装").when(!self.busy, |this| {
-                    this.on_click(cx.listener(|this, _, _, cx| this.install_version(cx)))
-                }),
+                primary_button("install-run", "开始安装").on_click(
+                    cx.listener(|this, _, _, cx| this.install_version(cx)),
+                ),
             ))
     }
 
@@ -1773,83 +2011,211 @@ impl LauncherUi {
             .text_size(px(12.5))
     }
 
-    fn render_log(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tasks(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let mono = cx.theme().mono_font_family.clone();
-        let summary = self.log_summary.clone();
-        let status_color = if self.busy { skin::BUSY } else { skin::FAINT };
+        let active = self.active_task;
+        let mut list = v_flex()
+            .id("task-list")
+            .w(px(280.))
+            .h_full()
+            .flex_shrink_0()
+            .gap(px(2.))
+            .overflow_y_scroll()
+            .pb(px(6.));
 
-        if self.log_follow {
-            self.log_follow = false;
-            self.log_scroll.scroll_to_bottom();
+        if self.tasks.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(skin::c(skin::FAINT))
+                    .child("暂无任务"),
+            );
+        }
+
+        for task in self.tasks.iter().rev() {
+            let id = task.id;
+            let (color, state_label) = match task.state {
+                TaskState::Running => (skin::BUSY, "运行中"),
+                TaskState::Success => (skin::OK, "完成"),
+                TaskState::Failed => (skin::DANGER_HOVER, "失败"),
+                TaskState::Cancelled => (skin::FAINT, "已取消"),
+            };
+            let selected = active == Some(id);
+            let percent = task
+                .progress
+                .map(|value| format!("{:.0}%", value * 100.0));
+            let mut entry = h_flex()
+                .id(SharedString::from(format!("task-{id}")))
+                .w_full()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .cursor(CursorStyle::PointingHand)
+                .when(selected, |this| this.bg(skin::c(skin::ACTIVE)))
+                .hover(|style| style.bg(skin::c(skin::HOVER)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.active_task = Some(id);
+                    this.task_log_follow = true;
+                    cx.notify();
+                }))
+                .child(dot(color, 6.))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(12.5))
+                                .text_color(skin::c(skin::TEXT))
+                                .child(task.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(skin::c(skin::FAINT))
+                                .child(state_label),
+                        ),
+                );
+            if let Some(percent) = percent {
+                entry = entry.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(skin::c(skin::MUTED))
+                        .child(percent),
+                );
+            }
+            list = list.child(entry);
+        }
+
+        let selected = active
+            .and_then(|id| self.tasks.iter().find(|task| task.id == id))
+            .map(|task| {
+                let skip = task.log_lines.len().saturating_sub(400);
+                (
+                    task.id,
+                    task.title.clone(),
+                    task.state,
+                    task.progress,
+                    task.log_lines.iter().skip(skip).cloned().collect::<Vec<_>>(),
+                )
+            });
+
+        let mut detail = v_flex().flex_1().min_w_0().h_full().gap(px(14.));
+        if let Some((id, title, state, progress, lines)) = selected {
+            let state_label = match state {
+                TaskState::Running => "运行中",
+                TaskState::Success => "完成",
+                TaskState::Failed => "失败",
+                TaskState::Cancelled => "已取消",
+            };
+            let mut header = h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(16.))
+                                .text_color(skin::c(skin::TEXT))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(skin::c(skin::FAINT))
+                                .child(format!("任务 #{id} · {state_label}")),
+                        ),
+                );
+            if state == TaskState::Running {
+                header = header.child(
+                    danger_button("task-cancel", "取消")
+                        .on_click(cx.listener(move |this, _, _, cx| this.cancel_task(id, cx))),
+                );
+            }
+            detail = detail.child(header);
+
+            if let Some(value) = progress {
+                detail = detail.child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .w(px(180.))
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(skin::c(skin::DIVIDER))
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(gpui::relative(value))
+                                        .rounded_full()
+                                        .bg(skin::c(skin::BUSY)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(skin::c(skin::MUTED))
+                                .child(format!("{:.0}%", value * 100.0)),
+                        ),
+                );
+            }
+
+            if self.task_log_follow {
+                self.task_log_follow = false;
+                self.task_log_scroll.scroll_to_bottom();
+            }
+
+            detail = detail.child(
+                div()
+                    .id("task-log")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.task_log_scroll)
+                    .rounded(px(10.))
+                    .bg(skin::c(skin::CARD))
+                    .px(px(16.))
+                    .py(px(12.))
+                    .font_family(mono)
+                    .text_size(px(11.5))
+                    .text_color(skin::c(skin::MUTED))
+                    .child(v_flex().gap(px(3.)).children(if lines.is_empty() {
+                        vec![SharedString::from("暂无日志")]
+                    } else {
+                        lines
+                    })),
+            );
+        } else {
+            detail = detail.child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(skin::c(skin::FAINT))
+                    .child("选择左侧任务查看日志"),
+            );
         }
 
         v_flex()
-            .w_full()
-            .rounded(px(12.))
-            .bg(skin::c(skin::CARD))
-            .overflow_hidden()
+            .size_full()
+            .gap(px(20.))
+            .child(page_title("任务", "查看正在运行和已完成的任务"))
             .child(
                 h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(16.))
-                    .px(px(20.))
-                    .py(px(10.))
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(dot(status_color, 6.))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(12.5))
-                                    .text_color(skin::c(skin::TEXT))
-                                    .child("日志"),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .text_color(skin::c(skin::FAINT))
-                                    .child(summary),
-                            ),
-                    )
-                    .child(
-                        text_button("log-toggle", if self.log_open { "收起" } else { "展开" })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.log_open = !this.log_open;
-                                this.log_follow = true;
-                                cx.notify();
-                            })),
-                    ),
+                    .flex_1()
+                    .min_h_0()
+                    .gap(px(20.))
+                    .child(list)
+                    .child(detail),
             )
-            .when(self.log_open, |panel| {
-                panel.child(sep()).child(
-                    div()
-                        .id("log-scroll")
-                        .h(px(160.))
-                        .px(px(20.))
-                        .py(px(12.))
-                        .overflow_y_scroll()
-                        .track_scroll(&self.log_scroll)
-                        .font_family(mono)
-                        .text_size(px(11.5))
-                        .text_color(skin::c(skin::MUTED))
-                        .child(v_flex().gap(px(3.)).children(if self.log_text.is_empty() {
-                            vec![SharedString::from("尚未运行任务")]
-                        } else {
-                            self.log_text
-                                .lines()
-                                .map(|line| SharedString::from(line.to_string()))
-                                .collect::<Vec<_>>()
-                        })),
-                )
-            })
     }
 }

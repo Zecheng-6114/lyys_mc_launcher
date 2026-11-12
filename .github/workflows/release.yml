@@ -10,7 +10,14 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,13 +25,30 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: 安装 Linux 构建依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake clang pkg-config \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libfontconfig-dev libfreetype-dev libvulkan-dev \
+            libegl1-mesa-dev libgl1-mesa-dev \
+            libssl-dev libasound2-dev
+
       - name: 构建
         run: cargo build --release
 
-      - name: 打包
-        run: Compress-Archive -Path target/release/lyys_mc_launcher.exe -DestinationPath lyys_mc_launcher-${{ github.ref_name }}.zip
+      - name: 打包（Windows）
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target/release/lyys_mc_launcher.exe -DestinationPath lyys_mc_launcher-${{ github.ref_name }}-windows.zip
+
+      - name: 打包（Linux）
+        if: runner.os == 'Linux'
+        run: tar -czf lyys_mc_launcher-${{ github.ref_name }}-linux.tar.gz -C target/release lyys_mc_launcher
 
       - name: 发布
         uses: softprops/action-gh-release@v2
         with:
-          files: lyys_mc_launcher-${{ github.ref_name }}.zip
+          files: lyys_mc_launcher-${{ github.ref_name }}-*
