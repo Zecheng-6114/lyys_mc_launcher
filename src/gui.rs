@@ -31,7 +31,6 @@ mod skin {
     pub const CONTENT: u32 = 0x161616;
     pub const CARD: u32 = 0x242424;
     pub const DIVIDER: u32 = 0x2f2f2f;
-    pub const APP_ICON: u32 = 0xfafafa;
     pub const HOVER: u32 = 0x2e2e2e;
     pub const ACTIVE: u32 = 0x3a3a3a;
     pub const FIELD: u32 = 0x2f2f2f;
@@ -43,7 +42,6 @@ mod skin {
     pub const ACCENT_HOVER: u32 = 0xffffff;
     pub const ACCENT_ACTIVE: u32 = 0xe4e4e4;
     pub const ACCENT_FG: u32 = 0x121212;
-    pub const OK: u32 = 0x5fbf8f;
     pub const BUSY: u32 = 0x7aa2f7;
 
     pub fn c(hex: u32) -> Rgba {
@@ -117,7 +115,7 @@ struct InstanceRow {
 pub struct LauncherUi {
     tab: usize,
     instance_page: usize,
-    content_tab: usize,
+    download_tab: usize,
     instances: Vec<InstanceRow>,
     busy: bool,
     status: SharedString,
@@ -159,7 +157,6 @@ pub struct LauncherUi {
     import_optional: bool,
 
     mod_query_input: Entity<input::InputState>,
-    mod_type_input: Entity<input::InputState>,
     mod_loader_input: Entity<input::InputState>,
     mod_version_input: Entity<input::InputState>,
     mod_limit_input: Entity<input::InputState>,
@@ -201,7 +198,7 @@ impl LauncherUi {
         let mut this = LauncherUi {
             tab: 0,
             instance_page: 0,
-            content_tab: 0,
+            download_tab: 0,
             instances: Vec::new(),
             busy: false,
             status: SharedString::from("就绪"),
@@ -243,7 +240,6 @@ impl LauncherUi {
             import_optional: false,
 
             mod_query_input: input(window, "", cx),
-            mod_type_input: input(window, "mod", cx),
             mod_loader_input: input(window, "", cx),
             mod_version_input: input(window, "", cx),
             mod_limit_input: input(window, "10", cx),
@@ -422,22 +418,6 @@ impl LauncherUi {
         cx.notify();
     }
 
-    fn open_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let username = Self::value(&self.username_input, cx);
-        Self::set_input(&self.install_username_input, &username, window, cx);
-        let memory = Self::value(&self.memory_input, cx);
-        Self::set_input(&self.install_memory_input, &memory, window, cx);
-        let java = Self::value(&self.java_input, cx);
-        Self::set_input(&self.install_java_input, &java, window, cx);
-        let mirror = Self::value(&self.mirror_input, cx);
-        Self::set_input(&self.install_mirror_input, &mirror, window, cx);
-        let maven = Self::value(&self.maven_input, cx);
-        Self::set_input(&self.install_maven_input, &maven, window, cx);
-        self.install_isolate = self.isolate;
-        self.instance_page = 1;
-        cx.notify();
-    }
-
     fn back_to_instances(&mut self, cx: &mut Context<Self>) {
         self.instance_page = 0;
         cx.notify();
@@ -534,11 +514,56 @@ impl LauncherUi {
         self.run_task(args, true, None, cx);
     }
 
+    fn import_modrinth(&mut self, cx: &mut Context<Self>) {
+        let dir = Self::value(&self.dir_input, cx);
+        if dir.is_empty() {
+            self.status = SharedString::from("请先设置游戏目录");
+            cx.notify();
+            return;
+        }
+        let slug = Self::value(&self.mod_slug_input, cx);
+        if slug.is_empty() {
+            self.status = SharedString::from("请填写整合包项目 slug");
+            cx.notify();
+            return;
+        }
+        let name = Self::value(&self.import_name_input, cx);
+        let java = Self::value(&self.java_input, cx);
+        let mirror = Self::value(&self.mirror_input, cx);
+        let maven = Self::value(&self.maven_input, cx);
+
+        let mut args = vec![
+            String::from("import"),
+            String::from("--dir"),
+            dir,
+            String::from("--modrinth"),
+            slug,
+        ];
+        push_option(&mut args, "--name", &name);
+        push_option(&mut args, "--java", &java);
+        push_option(&mut args, "--mirror", &mirror);
+        push_option(&mut args, "--maven", &maven);
+        if self.import_optional {
+            args.push(String::from("--with-optional"));
+        }
+
+        self.run_task(args, true, None, cx);
+    }
+
+    fn search_type(&self) -> &'static str {
+        match self.download_tab {
+            1 => "modpack",
+            3 => "resourcepack",
+            4 => "shader",
+            5 => "datapack",
+            _ => "mod",
+        }
+    }
+
     fn search_mods(&mut self, cx: &mut Context<Self>) {
         let query = Self::value(&self.mod_query_input, cx);
-        let project_type = Self::value(&self.mod_type_input, cx);
-        if query.is_empty() || project_type.is_empty() {
-            self.status = SharedString::from("请填写搜索关键词与项目类型");
+        if query.is_empty() {
+            self.status = SharedString::from("请填写搜索关键词");
             cx.notify();
             return;
         }
@@ -553,12 +578,14 @@ impl LauncherUi {
             String::from("--query"),
             query,
             String::from("--type"),
-            project_type,
+            String::from(self.search_type()),
             String::from("--limit"),
             limit,
         ];
-        let loader = Self::value(&self.mod_loader_input, cx);
-        push_option(&mut args, "--loader", &loader);
+        if self.download_tab >= 2 {
+            let loader = Self::value(&self.mod_loader_input, cx);
+            push_option(&mut args, "--loader", &loader);
+        }
         let version = Self::value(&self.mod_version_input, cx);
         push_option(&mut args, "--version", &version);
 
@@ -569,9 +596,8 @@ impl LauncherUi {
         let dir = Self::value(&self.dir_input, cx);
         let name = Self::value(&self.mod_instance_input, cx);
         let slug = Self::value(&self.mod_slug_input, cx);
-        let project_type = Self::value(&self.mod_type_input, cx);
-        if dir.is_empty() || name.is_empty() || slug.is_empty() || project_type.is_empty() {
-            self.status = SharedString::from("请填写游戏目录、实例名、项目和类型");
+        if dir.is_empty() || name.is_empty() || slug.is_empty() {
+            self.status = SharedString::from("请填写游戏目录、实例名和项目");
             cx.notify();
             return;
         }
@@ -584,7 +610,7 @@ impl LauncherUi {
             String::from("--slug"),
             slug,
             String::from("--type"),
-            project_type,
+            String::from(self.search_type()),
         ];
         self.run_task(args, false, None, cx);
     }
@@ -883,23 +909,6 @@ impl Render for LauncherUi {
     }
 }
 
-fn brand_mark() -> Div {
-    div()
-        .w(px(26.))
-        .h(px(26.))
-        .rounded(px(7.))
-        .bg(skin::c(skin::APP_ICON))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            v_flex()
-                .items_start()
-                .child(div().w(px(4.)).h(px(12.)).bg(skin::c(skin::ACCENT_FG)))
-                .child(div().w(px(10.)).h(px(4.)).bg(skin::c(skin::ACCENT_FG))),
-        )
-}
-
 fn dot(color: u32, size: f32) -> Div {
     div()
         .w(px(size))
@@ -1012,84 +1021,10 @@ fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stat
 
 impl LauncherUi {
     fn render_titlebar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        let status_color = if self.busy { skin::BUSY } else { skin::OK };
-
         TitleBar::new()
             .bg(skin::c(skin::WINDOW))
             .border_b_1()
             .border_color(skin::c(skin::TITLEBAR_LINE))
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .pr_3()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(brand_mark())
-                            .child(
-                                v_flex()
-                                    .gap(px(1.))
-                                    .child(
-                                        div()
-                                            .text_size(px(13.5))
-                                            .font_semibold()
-                                            .text_color(skin::c(skin::TEXT))
-                                            .child("LYYS"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(8.5))
-                                            .font_medium()
-                                            .text_color(skin::c(skin::MUTED))
-                                            .child("MINECRAFT LAUNCHER"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(1.))
-                                    .h(px(18.))
-                                    .mx(px(4.))
-                                    .bg(skin::c(skin::TITLEBAR_LINE)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .font_medium()
-                                    .text_color(skin::c(skin::MUTED))
-                                    .child(self.page_label()),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .child(dot(status_color, 6.))
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(skin::c(skin::MUTED))
-                                    .child(self.status.clone()),
-                            ),
-                    ),
-            )
-    }
-
-    fn page_label(&self) -> SharedString {
-        match self.instance_page {
-            1 => SharedString::from("安装新实例"),
-            2 if !self.cfg_name.is_empty() => {
-                SharedString::from(format!("实例设置 · {}", self.cfg_name))
-            }
-            2 => SharedString::from("实例设置"),
-            _ => match self.tab {
-                0 => SharedString::from("实例"),
-                1 => SharedString::from("内容"),
-                _ => SharedString::from("设置"),
-            },
-        }
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1101,14 +1036,6 @@ impl LauncherUi {
             .px(px(12.))
             .pt(px(6.))
             .pb(px(14.))
-            .child(
-                h_flex().mt(px(14.)).px(px(10.)).pb(px(6.)).child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(skin::c(skin::MUTED))
-                        .child("桌面"),
-                ),
-            )
             .child(self.side_nav(
                 "nav-instances",
                 IconName::LayoutDashboard,
@@ -1118,9 +1045,9 @@ impl LauncherUi {
                 cx,
             ))
             .child(self.side_nav(
-                "nav-content",
-                IconName::SquareTerminal,
-                "内容",
+                "nav-download",
+                IconName::ArrowDown,
+                "下载",
                 self.tab == 1,
                 1,
                 cx,
@@ -1143,21 +1070,12 @@ impl LauncherUi {
             ))
             .child(div().flex_1())
             .child(
-                v_flex()
-                    .px(px(10.))
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(skin::c(skin::FAINT))
-                            .child("Minecraft · Java 版"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(skin::c(skin::FAINT))
-                            .child(env!("CARGO_PKG_VERSION")),
-                    ),
+                v_flex().px(px(10.)).gap(px(2.)).child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(skin::c(skin::FAINT))
+                        .child(env!("CARGO_PKG_VERSION")),
+                ),
             )
     }
 
@@ -1191,7 +1109,7 @@ impl LauncherUi {
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.tab = index;
                 this.instance_page = 0;
-                this.content_tab = 0;
+                this.download_tab = 0;
                 cx.notify();
             }))
             .child(Icon::new(icon).with_size(px(16.)).text_color(foreground))
@@ -1234,11 +1152,10 @@ impl LauncherUi {
 
     fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match self.instance_page {
-            1 => self.render_install_page(cx).into_any_element(),
             2 => self.render_instance_settings_page(cx).into_any_element(),
             _ => match self.tab {
                 0 => self.render_instances(cx).into_any_element(),
-                1 => self.render_content(cx).into_any_element(),
+                1 => self.render_download(cx).into_any_element(),
                 _ => self.render_general_settings(cx).into_any_element(),
             },
         }
@@ -1254,7 +1171,7 @@ impl LauncherUi {
                     div()
                         .text_size(px(13.))
                         .text_color(skin::c(skin::FAINT))
-                        .child("暂无实例，先安装一个版本或在内容页导入整合包"),
+                        .child("暂无实例，先到下载页安装版本或导入整合包"),
                 ),
             );
         }
@@ -1332,10 +1249,7 @@ impl LauncherUi {
                             .pt(px(4.))
                             .child(text_button("refresh", "刷新").when(!disabled, |this| {
                                 this.on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
-                            }))
-                            .child(primary_button("open-install", "安装新实例").on_click(
-                                cx.listener(|this, _, window, cx| this.open_install(window, cx)),
-                            )),
+                            })),
                     ),
             )
             .child(
@@ -1349,11 +1263,11 @@ impl LauncherUi {
             )
     }
 
-    fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let pack_active = self.content_tab == 0;
-
+    fn render_download(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut body = v_flex().gap(px(16.));
-        if pack_active {
+        if self.download_tab == 0 {
+            body = body.child(self.render_install_form(cx));
+        } else if self.download_tab == 1 {
             body = body
                 .child(
                     panel()
@@ -1386,6 +1300,46 @@ impl LauncherUi {
                     primary_button("import-run", "导入整合包").when(!self.busy, |this| {
                         this.on_click(cx.listener(|this, _, _, cx| this.import_pack(cx)))
                     }),
+                ))
+                .child(
+                    panel()
+                        .child(
+                            row()
+                                .child(row_text("关键词", "搜索 Modrinth 上的整合包"))
+                                .child(self.input_control(&self.mod_query_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("游戏版本", "例如 1.20.1，留空表示不限"))
+                                .child(self.input_control(&self.mod_version_input)),
+                        )
+                        .child(sep())
+                        .child(
+                            row()
+                                .child(row_text("数量", "一次返回的结果条数"))
+                                .child(self.input_control(&self.mod_limit_input)),
+                        ),
+                )
+                .child(h_flex().w_full().justify_end().child(
+                    primary_button("pack-search-run", "搜索整合包").when(!self.busy, |this| {
+                        this.on_click(cx.listener(|this, _, _, cx| this.search_mods(cx)))
+                    }),
+                ))
+                .child(
+                    panel().child(
+                        row()
+                            .child(row_text("项目 slug", "搜索结果日志中的项目标识"))
+                            .child(self.input_control(&self.mod_slug_input)),
+                    ),
+                )
+                .child(h_flex().w_full().justify_end().child(
+                    primary_button("pack-import-run", "从 Modrinth 导入").when(
+                        !self.busy,
+                        |this| {
+                            this.on_click(cx.listener(|this, _, _, cx| this.import_modrinth(cx)))
+                        },
+                    ),
                 ));
         } else {
             body = body
@@ -1393,14 +1347,8 @@ impl LauncherUi {
                     panel()
                         .child(
                             row()
-                                .child(row_text("关键词", "搜索 Modrinth 上的模组、整合包与资源包"))
+                                .child(row_text("关键词", "搜索 Modrinth 上的内容并安装到实例"))
                                 .child(self.input_control(&self.mod_query_input)),
-                        )
-                        .child(sep())
-                        .child(
-                            row()
-                                .child(row_text("类型", "mod / modpack / resourcepack / shader"))
-                                .child(self.input_control(&self.mod_type_input)),
                         )
                         .child(sep())
                         .child(
@@ -1456,7 +1404,7 @@ impl LauncherUi {
                     .items_start()
                     .justify_between()
                     .gap(px(16.))
-                    .child(page_title("内容", "导入整合包、检索并安装 Modrinth 资源"))
+                    .child(page_title("下载", "安装游戏版本、导入整合包或安装内容资源"))
                     .child(
                         h_flex()
                             .flex_shrink_0()
@@ -1464,15 +1412,49 @@ impl LauncherUi {
                             .p(px(3.))
                             .rounded(px(9.))
                             .bg(skin::c(skin::PANEL))
-                            .child(self.segment("tab-pack", "整合包", pack_active, 0, cx))
-                            .child(self.segment("tab-mods", "模组", !pack_active, 1, cx)),
+                            .child(self.segment(
+                                "tab-instance",
+                                "实例",
+                                self.download_tab == 0,
+                                0,
+                                cx,
+                            ))
+                            .child(self.segment(
+                                "tab-pack",
+                                "整合包",
+                                self.download_tab == 1,
+                                1,
+                                cx,
+                            ))
+                            .child(self.segment("tab-mods", "模组", self.download_tab == 2, 2, cx))
+                            .child(self.segment(
+                                "tab-resourcepack",
+                                "资源包",
+                                self.download_tab == 3,
+                                3,
+                                cx,
+                            ))
+                            .child(self.segment(
+                                "tab-shader",
+                                "光影",
+                                self.download_tab == 4,
+                                4,
+                                cx,
+                            ))
+                            .child(self.segment(
+                                "tab-datapack",
+                                "数据包",
+                                self.download_tab == 5,
+                                5,
+                                cx,
+                            )),
                     ),
             )
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .id("content-scroll")
+                    .id("download-scroll")
                     .overflow_y_scroll()
                     .pb(px(6.))
                     .child(body),
@@ -1502,7 +1484,7 @@ impl LauncherUi {
             .when(!active, |this| this.text_color(skin::c(skin::MUTED)))
             .cursor(CursorStyle::PointingHand)
             .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.content_tab = index;
+                this.download_tab = index;
                 cx.notify();
             }))
             .child(label)
@@ -1599,133 +1581,86 @@ impl LauncherUi {
             )
     }
 
-    fn render_install_page(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_install_form(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .size_full()
-            .gap(px(20.))
+            .gap(px(16.))
             .child(
-                h_flex()
-                    .w_full()
-                    .items_start()
-                    .gap(px(10.))
+                panel()
                     .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .pt(px(4.))
-                            .child(text_button("install-back", "←").on_click(
-                                cx.listener(|this, _, _, cx| this.back_to_instances(cx)),
-                            )),
+                        row()
+                            .child(row_text("MC 版本", "例如 1.20.1"))
+                            .child(self.input_control(&self.install_version_input)),
                     )
-                    .child(page_title("安装新实例", "选择版本与加载器，创建独立实例")),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .id("install-scroll")
-                    .overflow_y_scroll()
-                    .pb(px(6.))
+                    .child(sep())
                     .child(
-                        v_flex()
-                            .gap(px(16.))
-                            .child(
-                                panel()
-                                    .child(
-                                        row()
-                                            .child(row_text("MC 版本", "例如 1.20.1"))
-                                            .child(self.input_control(&self.install_version_input)),
-                                    )
-                                    .child(sep())
-                                    .child(
-                                        row()
-                                            .child(row_text("实例名称", "留空则使用版本号命名"))
-                                            .child(self.input_control(&self.install_name_input)),
-                                    )
-                                    .child(sep())
-                                    .child(
-                                        row()
-                                            .child(row_text(
-                                                "加载器",
-                                                "fabric / forge / neoforge / quilt",
-                                            ))
-                                            .child(self.input_control(&self.install_loader_input)),
-                                    )
-                                    .child(sep())
-                                    .child(
-                                        row()
-                                            .child(row_text("加载器版本", "留空时使用最新版本"))
-                                            .child(
-                                                self.input_control(
-                                                    &self.install_loader_version_input,
-                                                ),
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                panel()
-                                    .child(
-                                        row()
-                                            .child(row_text("用户名", "启动游戏时使用的玩家名称"))
-                                            .child(
-                                                self.input_control(&self.install_username_input),
-                                            ),
-                                    )
-                                    .child(sep())
-                                    .child(
-                                        row()
-                                            .child(row_text("内存 (MB)", "分配给游戏的最大堆内存"))
-                                            .child(self.input_control(&self.install_memory_input)),
-                                    )
-                                    .child(sep())
-                                    .child(
-                                        row()
-                                            .child(row_text("Java 路径", "留空时自动查找可用 Java"))
-                                            .child(self.input_control(&self.install_java_input)),
-                                    )
-                                    .child(sep())
-                                    .child(
-                                        row()
-                                            .child(row_text("镜像地址", "替换资源下载源"))
-                                            .child(self.input_control(&self.install_mirror_input)),
-                                    )
-                                    .child(sep())
-                                    .child(
-                                        row()
-                                            .child(row_text("Maven 仓库", "自定义依赖仓库地址"))
-                                            .child(self.input_control(&self.install_maven_input)),
-                                    ),
-                            )
-                            .child(
-                                panel().child(
-                                    row()
-                                        .child(row_text(
-                                            "隔离运行",
-                                            "实例使用独立目录，模组与存档互不影响",
-                                        ))
-                                        .child(
-                                            Switch::new("install-isolate")
-                                                .checked(self.install_isolate)
-                                                .on_click(cx.listener(
-                                                    |this, checked: &bool, _, cx| {
-                                                        this.install_isolate = *checked;
-                                                        cx.notify();
-                                                    },
-                                                )),
-                                        ),
-                                ),
-                            )
-                            .child(h_flex().w_full().justify_end().child(
-                                primary_button("install-run", "开始安装").when(
-                                    !self.busy,
-                                    |this| {
-                                        this.on_click(
-                                            cx.listener(|this, _, _, cx| this.install_version(cx)),
-                                        )
-                                    },
-                                ),
-                            )),
+                        row()
+                            .child(row_text("实例名称", "留空则使用版本号命名"))
+                            .child(self.input_control(&self.install_name_input)),
+                    )
+                    .child(sep())
+                    .child(
+                        row()
+                            .child(row_text("加载器", "fabric / forge / neoforge / quilt"))
+                            .child(self.input_control(&self.install_loader_input)),
+                    )
+                    .child(sep())
+                    .child(
+                        row()
+                            .child(row_text("加载器版本", "留空时使用最新版本"))
+                            .child(self.input_control(&self.install_loader_version_input)),
                     ),
             )
+            .child(
+                panel()
+                    .child(
+                        row()
+                            .child(row_text("用户名", "启动游戏时使用的玩家名称"))
+                            .child(self.input_control(&self.install_username_input)),
+                    )
+                    .child(sep())
+                    .child(
+                        row()
+                            .child(row_text("内存 (MB)", "分配给游戏的最大堆内存"))
+                            .child(self.input_control(&self.install_memory_input)),
+                    )
+                    .child(sep())
+                    .child(
+                        row()
+                            .child(row_text("Java 路径", "留空时自动查找可用 Java"))
+                            .child(self.input_control(&self.install_java_input)),
+                    )
+                    .child(sep())
+                    .child(
+                        row()
+                            .child(row_text("镜像地址", "替换资源下载源"))
+                            .child(self.input_control(&self.install_mirror_input)),
+                    )
+                    .child(sep())
+                    .child(
+                        row()
+                            .child(row_text("Maven 仓库", "自定义依赖仓库地址"))
+                            .child(self.input_control(&self.install_maven_input)),
+                    ),
+            )
+            .child(
+                panel().child(
+                    row()
+                        .child(row_text("隔离运行", "实例使用独立目录，模组与存档互不影响"))
+                        .child(
+                            Switch::new("install-isolate")
+                                .checked(self.install_isolate)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.install_isolate = *checked;
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+            )
+            .child(h_flex().w_full().justify_end().child(
+                primary_button("install-run", "开始安装").when(!self.busy, |this| {
+                    this.on_click(cx.listener(|this, _, _, cx| this.install_version(cx)))
+                }),
+            ))
     }
 
     fn render_instance_settings_page(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
