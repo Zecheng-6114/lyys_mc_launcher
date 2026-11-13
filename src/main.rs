@@ -2,6 +2,7 @@ mod account;
 mod cli;
 mod download;
 mod gui;
+mod i18n;
 mod installer;
 mod instance;
 mod launch;

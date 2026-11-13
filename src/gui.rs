@@ -25,6 +25,7 @@ use gpui_platform::application;
 use serde_json::{Value, json};
 use smol::channel;
 
+use crate::i18n::{self, Lang};
 use crate::instance::{self, LaunchConfig};
 
 mod skin {
@@ -133,6 +134,15 @@ enum TaskState {
     Cancelled,
 }
 
+fn task_state_key(state: TaskState) -> &'static str {
+    match state {
+        TaskState::Running => "task.state.running",
+        TaskState::Success => "task.state.success",
+        TaskState::Failed => "task.state.failed",
+        TaskState::Cancelled => "task.state.cancelled",
+    }
+}
+
 struct TaskEntry {
     id: usize,
     title: SharedString,
@@ -156,6 +166,8 @@ pub struct LauncherUi {
     tab: usize,
     instance_page: usize,
     download_tab: usize,
+    lang: Lang,
+    language: Option<SharedString>,
     instances: Vec<InstanceRow>,
     tasks: Vec<TaskEntry>,
     active_task: Option<usize>,
@@ -232,11 +244,18 @@ impl LauncherUi {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = load_settings();
         let memory = settings.memory.unwrap_or(4096).min(65536).to_string();
+        let lang = settings
+            .language
+            .as_deref()
+            .and_then(Lang::from_tag)
+            .unwrap_or(i18n::FALLBACK);
 
         let mut this = LauncherUi {
             tab: 0,
             instance_page: 0,
             download_tab: 0,
+            lang,
+            language: settings.language.clone().map(SharedString::from),
             instances: Vec::new(),
             tasks: Vec::new(),
             active_task: None,
@@ -308,6 +327,42 @@ impl LauncherUi {
         text.parse().ok()
     }
 
+    fn t(&self, key: &str) -> SharedString {
+        i18n::text(self.lang, key)
+    }
+
+    fn t_args(&self, key: &str, args: &[(&str, &str)]) -> SharedString {
+        i18n::text_args(self.lang, key, args)
+    }
+
+    fn select_language(&mut self, lang: Lang, cx: &mut Context<Self>) {
+        if self.lang == lang {
+            return;
+        }
+        self.lang = lang;
+        self.language = Some(SharedString::from(lang.tag()));
+        let value = self.settings_value(cx);
+        let _ = write_json(&config_path(), &value, lang);
+        cx.notify();
+    }
+
+    fn settings_value(&self, cx: &Context<Self>) -> Value {
+        let memory = self.memory_value(&self.memory_input, cx);
+        let mut value = json!({
+            "game_dir": Self::value(&self.dir_input, cx),
+            "username": Self::value(&self.username_input, cx),
+            "memory": memory.unwrap_or(4096),
+            "java": Self::value(&self.java_input, cx),
+            "mirror": Self::value(&self.mirror_input, cx),
+            "maven": Self::value(&self.maven_input, cx),
+            "isolate": self.isolate,
+        });
+        if let Some(language) = &self.language {
+            value["language"] = json!(language.to_string());
+        }
+        value
+    }
+
     fn reload(&mut self, cx: &mut Context<Self>) {
         let dir = Self::value(&self.dir_input, cx);
         self.instances = list_instances(&dir);
@@ -375,8 +430,9 @@ impl LauncherUi {
         cx.notify();
 
         let (event_tx, event_rx) = channel::unbounded::<TaskEvent>();
+        let lang = self.lang;
         std::thread::spawn(move || {
-            execute(exe, args, event_tx, handle);
+            execute(exe, args, event_tx, handle, lang);
         });
 
         cx.spawn(async move |weak, cx| {
@@ -433,7 +489,9 @@ impl LauncherUi {
                     && let Some((dir, name, config)) = save
                     && let Err(error) = instance::write_launch_config(&dir, &name, &config)
                 {
-                    let text = format!("保存实例设置失败: {error}");
+                    let text = this
+                        .t_args("error.save_instance", &[("error", &error.to_string())])
+                        .to_string();
                     this.push_task_log(id, text, cx);
                 }
                 if refresh {
@@ -513,8 +571,9 @@ impl LauncherUi {
         push_option(&mut args, "--mirror", &params.mirror);
         push_option(&mut args, "--maven", &params.maven);
 
+        let title = self.t_args("task.title.launch", &[("name", name)]);
         self.start_task(
-            SharedString::from(format!("启动 {name}")),
+            title,
             Some(SharedString::from(name)),
             args,
             false,
@@ -588,8 +647,9 @@ impl LauncherUi {
                 },
             ))
         };
+        let title = self.t_args("task.title.install", &[("version", &version)]);
         self.start_task(
-            SharedString::from(format!("安装 {version}")),
+            title,
             instance,
             args,
             true,
@@ -629,7 +689,7 @@ impl LauncherUi {
 
         let instance = (!name.is_empty()).then(|| SharedString::from(name.clone()));
         self.start_task(
-            SharedString::from("导入整合包"),
+            self.t("task.title.import"),
             instance,
             args,
             true,
@@ -669,7 +729,7 @@ impl LauncherUi {
 
         let instance = (!name.is_empty()).then(|| SharedString::from(name.clone()));
         self.start_task(
-            SharedString::from("导入整合包"),
+            self.t("task.title.import"),
             instance,
             args,
             true,
@@ -713,8 +773,9 @@ impl LauncherUi {
         let version = Self::value(&self.mod_version_input, cx);
         push_option(&mut args, "--version", &version);
 
+        let title = self.t_args("task.title.search", &[("query", &query)]);
         self.start_task(
-            SharedString::from(format!("搜索 {query}")),
+            title,
             None,
             args,
             false,
@@ -741,8 +802,9 @@ impl LauncherUi {
             String::from("--type"),
             String::from(self.search_type()),
         ];
+        let title = self.t_args("task.title.add", &[("slug", &slug)]);
         self.start_task(
-            SharedString::from(format!("添加 {slug}")),
+            title,
             Some(SharedString::from(name)),
             args,
             false,
@@ -808,21 +870,12 @@ impl LauncherUi {
     }
 
     fn save_settings(&mut self, cx: &mut Context<Self>) {
-        let memory = self.memory_value(&self.memory_input, cx);
         if Self::value(&self.memory_input, cx).is_empty() {
             return;
         }
-        let value = json!({
-            "game_dir": Self::value(&self.dir_input, cx),
-            "username": Self::value(&self.username_input, cx),
-            "memory": memory.unwrap_or(4096),
-            "java": Self::value(&self.java_input, cx),
-            "mirror": Self::value(&self.mirror_input, cx),
-            "maven": Self::value(&self.maven_input, cx),
-            "isolate": self.isolate,
-        });
+        let value = self.settings_value(cx);
         let path = config_path();
-        let _ = write_json(&path, &value);
+        let _ = write_json(&path, &value, self.lang);
         self.reload(cx);
     }
 }
@@ -866,6 +919,7 @@ fn execute(
     args: Vec<String>,
     tx: channel::Sender<TaskEvent>,
     task: Arc<TaskHandle>,
+    lang: Lang,
 ) -> bool {
     let child = Command::new(exe)
         .args(&args)
@@ -874,7 +928,9 @@ fn execute(
         .stderr(Stdio::piped())
         .spawn();
     let Ok(mut child) = child else {
-        let _ = tx.send_blocking(TaskEvent::Log(String::from("启动任务失败")));
+        let _ = tx.send_blocking(TaskEvent::Log(
+            i18n::text(lang, "log.start_failed").to_string(),
+        ));
         let _ = tx.send_blocking(TaskEvent::Done(false));
         return false;
     };
@@ -916,15 +972,19 @@ fn execute(
             None => std::thread::sleep(Duration::from_millis(100)),
             Some(Ok(status)) => {
                 let success = status.success();
-                let _ = tx.send_blocking(TaskEvent::Log(format!("任务退出: {status}")));
+                let _ = tx.send_blocking(TaskEvent::Log(
+                    i18n::text_args(lang, "log.exit", &[("status", &status.to_string())])
+                        .to_string(),
+                ));
                 let _ = tx.send_blocking(TaskEvent::Done(success));
                 return success;
             }
             Some(Err(error)) => {
                 let message = if task.cancelled.load(Ordering::SeqCst) {
-                    String::from("任务已取消")
+                    i18n::text(lang, "log.cancelled").to_string()
                 } else {
-                    format!("等待任务失败: {error}")
+                    i18n::text_args(lang, "log.wait_failed", &[("error", &error.to_string())])
+                        .to_string()
                 };
                 let _ = tx.send_blocking(TaskEvent::Log(message));
                 let _ = tx.send_blocking(TaskEvent::Done(false));
@@ -1023,6 +1083,7 @@ struct Settings {
     mirror: String,
     maven: String,
     isolate: bool,
+    language: Option<String>,
 }
 
 impl Settings {
@@ -1035,6 +1096,7 @@ impl Settings {
             mirror: String::new(),
             maven: String::new(),
             isolate: false,
+            language: None,
         }
     }
 }
@@ -1064,6 +1126,7 @@ fn load_settings() -> Settings {
         mirror: value["mirror"].as_str().unwrap_or("").to_string(),
         maven: value["maven"].as_str().unwrap_or("").to_string(),
         isolate: value["isolate"].as_bool().unwrap_or(false),
+        language: value["language"].as_str().map(str::to_string),
     }
 }
 
@@ -1073,12 +1136,16 @@ fn config_path() -> PathBuf {
         .join("config.json")
 }
 
-fn write_json(path: &Path, value: &Value) -> Result<(), String> {
+fn write_json(path: &Path, value: &Value, lang: Lang) -> Result<(), String> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
+        std::fs::create_dir_all(dir).map_err(|e| {
+            i18n::text_args(lang, "error.create_dir", &[("error", &e.to_string())]).to_string()
+        })?;
     }
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| format!("写入文件失败: {e}"))
+    std::fs::write(path, text).map_err(|e| {
+        i18n::text_args(lang, "error.write_file", &[("error", &e.to_string())]).to_string()
+    })
 }
 
 impl Render for LauncherUi {
@@ -1153,7 +1220,9 @@ fn sep() -> Div {
     div().h(px(1.)).mx(px(20.)).bg(skin::c(skin::DIVIDER))
 }
 
-fn page_title(title: &'static str, subtitle: &'static str) -> Div {
+fn page_title(title: impl Into<SharedString>, subtitle: impl Into<SharedString>) -> Div {
+    let title = title.into();
+    let subtitle = subtitle.into();
     v_flex()
         .gap(px(4.))
         .child(
@@ -1234,7 +1303,7 @@ impl LauncherUi {
             .iter()
             .filter(|task| task.state == TaskState::Running)
             .count();
-        let mut button = text_button("nav-tasks", "任务").on_click(cx.listener(
+        let mut button = text_button("nav-tasks", self.t("nav.tasks")).on_click(cx.listener(
             |this, _, _, cx| {
                 this.tab = 3;
                 this.instance_page = 0;
@@ -1281,7 +1350,7 @@ impl LauncherUi {
             .child(self.side_nav(
                 "nav-instances",
                 IconName::LayoutDashboard,
-                "实例",
+                self.t("nav.instances"),
                 self.tab == 0,
                 0,
                 cx,
@@ -1289,7 +1358,7 @@ impl LauncherUi {
             .child(self.side_nav(
                 "nav-download",
                 IconName::ArrowDown,
-                "下载",
+                self.t("nav.download"),
                 self.tab == 1,
                 1,
                 cx,
@@ -1299,13 +1368,13 @@ impl LauncherUi {
                     div()
                         .text_size(px(13.))
                         .text_color(skin::c(skin::MUTED))
-                        .child("系统"),
+                        .child(self.t("nav.section.system")),
                 ),
             )
             .child(self.side_nav(
                 "nav-settings",
                 IconName::Settings,
-                "设置",
+                self.t("nav.settings"),
                 self.tab == 2,
                 2,
                 cx,
@@ -1326,11 +1395,12 @@ impl LauncherUi {
         &self,
         id: &'static str,
         icon: IconName,
-        label: &'static str,
+        label: impl Into<SharedString>,
         active: bool,
         index: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let label = label.into();
         let foreground = if active {
             skin::c(skin::TEXT)
         } else {
@@ -1404,7 +1474,7 @@ impl LauncherUi {
                     div()
                         .text_size(px(13.))
                         .text_color(skin::c(skin::FAINT))
-                        .child("暂无实例，先到下载页安装版本或导入整合包"),
+                        .child(self.t("instances.empty")),
                 ),
             );
         }
@@ -1416,7 +1486,7 @@ impl LauncherUi {
             let settings_name = row_data.name.clone();
             let mut meta = format!("{} · {}", row_data.version, row_data.loader);
             if row_data.isolated {
-                meta.push_str(" · 隔离");
+                meta.push_str(&format!(" · {}", self.t("instances.meta.isolated")));
             }
             if index > 0 {
                 list = list.child(sep());
@@ -1432,7 +1502,7 @@ impl LauncherUi {
                             .child(if let Some(task_id) = running {
                                 danger_button(
                                     SharedString::from(format!("cancel-{launch_name}")),
-                                    "取消",
+                                    self.t("instances.action.cancel"),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.cancel_task(task_id, cx)
@@ -1441,7 +1511,7 @@ impl LauncherUi {
                             } else {
                                 primary_button(
                                     SharedString::from(format!("launch-{launch_name}")),
-                                    "启动",
+                                    self.t("instances.action.launch"),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.launch_instance(&launch_click, cx)
@@ -1451,7 +1521,7 @@ impl LauncherUi {
                             .child(
                                 text_button(
                                     SharedString::from(format!("folder-{launch_name}")),
-                                    "目录",
+                                    self.t("instances.action.folder"),
                                 )
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| this.open_folder(&folder_name, cx),
@@ -1460,7 +1530,7 @@ impl LauncherUi {
                             .child(
                                 text_button(
                                     SharedString::from(format!("settings-{launch_name}")),
-                                    "设置",
+                                    self.t("instances.action.settings"),
                                 )
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
@@ -1481,14 +1551,17 @@ impl LauncherUi {
                     .items_start()
                     .justify_between()
                     .gap(px(16.))
-                    .child(page_title("实例", "管理和启动本机已安装的游戏实例"))
+                    .child(page_title(
+                        self.t("page.instances.title"),
+                        self.t("page.instances.subtitle"),
+                    ))
                     .child(
                         h_flex()
                             .flex_shrink_0()
                             .items_center()
                             .gap(px(6.))
                             .pt(px(4.))
-                            .child(text_button("refresh", "刷新").on_click(
+                            .child(text_button("refresh", self.t("common.refresh")).on_click(
                                 cx.listener(|this, _, _, cx| this.reload(cx)),
                             )),
                     ),
@@ -1514,19 +1587,28 @@ impl LauncherUi {
                     panel()
                         .child(
                             row()
-                                .child(row_text("包文件路径", "支持 .zip 与 .mrpack 整合包文件"))
+                                .child(row_text(
+                                    self.t("download.import.file.title"),
+                                    self.t("download.import.file.desc"),
+                                ))
                                 .child(self.input_control(&self.import_file_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text("实例名称", "留空时使用整合包内的名称"))
+                                .child(row_text(
+                                    self.t("download.import.name.title"),
+                                    self.t("download.import.name.desc"),
+                                ))
                                 .child(self.input_control(&self.import_name_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text("导入可选模组", "同时安装作者标记为可选的模组"))
+                                .child(row_text(
+                                    self.t("download.import.optional.title"),
+                                    self.t("download.import.optional.desc"),
+                                ))
                                 .child(
                                     Switch::new("import-optional")
                                         .checked(self.import_optional)
@@ -1538,7 +1620,7 @@ impl LauncherUi {
                         ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("import-run", "导入整合包").on_click(
+                    primary_button("import-run", self.t("download.import.run")).on_click(
                         cx.listener(|this, _, _, cx| this.import_pack(cx)),
                     ),
                 ))
@@ -1546,36 +1628,48 @@ impl LauncherUi {
                     panel()
                         .child(
                             row()
-                                .child(row_text("关键词", "搜索 Modrinth 上的整合包"))
+                                .child(row_text(
+                                    self.t("download.pack.query.title"),
+                                    self.t("download.pack.query.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_query_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text("游戏版本", "例如 1.20.1，留空表示不限"))
+                                .child(row_text(
+                                    self.t("download.version.title"),
+                                    self.t("download.version.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_version_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text("数量", "一次返回的结果条数"))
+                                .child(row_text(
+                                    self.t("download.limit.title"),
+                                    self.t("download.limit.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_limit_input)),
                         ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("pack-search-run", "搜索整合包").on_click(
+                    primary_button("pack-search-run", self.t("download.pack.search")).on_click(
                         cx.listener(|this, _, _, cx| this.search_mods(cx)),
                     ),
                 ))
                 .child(
                     panel().child(
                         row()
-                            .child(row_text("项目 slug", "搜索结果日志中的项目标识"))
+                            .child(row_text(
+                                self.t("download.pack.slug.title"),
+                                self.t("download.pack.slug.desc"),
+                            ))
                             .child(self.input_control(&self.mod_slug_input)),
                     ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("pack-import-run", "从 Modrinth 导入").on_click(
+                    primary_button("pack-import-run", self.t("download.pack.import")).on_click(
                         cx.listener(|this, _, _, cx| this.import_modrinth(cx)),
                     ),
                 ));
@@ -1585,30 +1679,42 @@ impl LauncherUi {
                     panel()
                         .child(
                             row()
-                                .child(row_text("关键词", "搜索 Modrinth 上的内容并安装到实例"))
+                                .child(row_text(
+                                    self.t("download.pack.query.title"),
+                                    self.t("download.content.query.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_query_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text("加载器", "例如 fabric、forge、neoforge"))
+                                .child(row_text(
+                                    self.t("download.content.loader.title"),
+                                    self.t("download.content.loader.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_loader_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text("游戏版本", "例如 1.20.1，留空表示不限"))
+                                .child(row_text(
+                                    self.t("download.version.title"),
+                                    self.t("download.version.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_version_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text("数量", "一次返回的结果条数"))
+                                .child(row_text(
+                                    self.t("download.limit.title"),
+                                    self.t("download.limit.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_limit_input)),
                         ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("search-run", "搜索").on_click(
+                    primary_button("search-run", self.t("download.content.search")).on_click(
                         cx.listener(|this, _, _, cx| this.search_mods(cx)),
                     ),
                 ))
@@ -1616,18 +1722,24 @@ impl LauncherUi {
                     panel()
                         .child(
                             row()
-                                .child(row_text("项目 slug", "Modrinth 项目页地址中的标识"))
+                                .child(row_text(
+                                    self.t("download.pack.slug.title"),
+                                    self.t("download.content.slug.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_slug_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text("实例名称", "把资源安装到这个实例"))
+                                .child(row_text(
+                                    self.t("download.content.instance.title"),
+                                    self.t("download.content.instance.desc"),
+                                ))
                                 .child(self.input_control(&self.mod_instance_input)),
                         ),
                 )
                 .child(h_flex().w_full().justify_end().child(
-                    primary_button("add-run", "添加到实例").on_click(
+                    primary_button("add-run", self.t("download.content.add")).on_click(
                         cx.listener(|this, _, _, cx| this.add_mod(cx)),
                     ),
                 ));
@@ -1642,7 +1754,10 @@ impl LauncherUi {
                     .items_start()
                     .justify_between()
                     .gap(px(16.))
-                    .child(page_title("下载", "安装游戏版本、导入整合包或安装内容资源"))
+                    .child(page_title(
+                        self.t("page.download.title"),
+                        self.t("page.download.subtitle"),
+                    ))
                     .child(
                         h_flex()
                             .flex_shrink_0()
@@ -1652,36 +1767,42 @@ impl LauncherUi {
                             .bg(skin::c(skin::PANEL))
                             .child(self.segment(
                                 "tab-instance",
-                                "实例",
+                                self.t("download.tab.instance"),
                                 self.download_tab == 0,
                                 0,
                                 cx,
                             ))
                             .child(self.segment(
                                 "tab-pack",
-                                "整合包",
+                                self.t("download.tab.pack"),
                                 self.download_tab == 1,
                                 1,
                                 cx,
                             ))
-                            .child(self.segment("tab-mods", "模组", self.download_tab == 2, 2, cx))
+                            .child(self.segment(
+                                "tab-mods",
+                                self.t("download.tab.mods"),
+                                self.download_tab == 2,
+                                2,
+                                cx,
+                            ))
                             .child(self.segment(
                                 "tab-resourcepack",
-                                "资源包",
+                                self.t("download.tab.resourcepack"),
                                 self.download_tab == 3,
                                 3,
                                 cx,
                             ))
                             .child(self.segment(
                                 "tab-shader",
-                                "光影",
+                                self.t("download.tab.shader"),
                                 self.download_tab == 4,
                                 4,
                                 cx,
                             ))
                             .child(self.segment(
                                 "tab-datapack",
-                                "数据包",
+                                self.t("download.tab.datapack"),
                                 self.download_tab == 5,
                                 5,
                                 cx,
@@ -1702,11 +1823,12 @@ impl LauncherUi {
     fn segment(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         active: bool,
         index: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let label = label.into();
         div()
             .id(id)
             .h(px(26.))
@@ -1728,11 +1850,41 @@ impl LauncherUi {
             .child(label)
     }
 
+    fn lang_option(
+        &self,
+        id: &'static str,
+        lang: Lang,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .h(px(26.))
+            .px(px(12.))
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .text_size(px(12.5))
+            .when(active, |this| {
+                this.bg(skin::c(skin::ACTIVE))
+                    .text_color(skin::c(skin::TEXT))
+            })
+            .when(!active, |this| this.text_color(skin::c(skin::MUTED)))
+            .cursor(CursorStyle::PointingHand)
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.select_language(lang, cx);
+            }))
+            .child(lang.native_name())
+    }
+
     fn render_general_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
             .gap(px(20.))
-            .child(page_title("设置", "全局启动偏好，对所有实例生效"))
+            .child(page_title(
+                self.t("page.settings.title"),
+                self.t("page.settings.subtitle"),
+            ))
             .child(
                 div()
                     .flex_1()
@@ -1748,21 +1900,27 @@ impl LauncherUi {
                                     .child(
                                         row()
                                             .child(row_text(
-                                                "游戏目录",
-                                                "Minecraft 安装位置，实例从 versions 读取",
+                                                self.t("settings.game_dir.title"),
+                                                self.t("settings.game_dir.desc"),
                                             ))
                                             .child(self.input_control(&self.dir_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text("用户名", "启动游戏时使用的玩家名称"))
+                                            .child(row_text(
+                                                self.t("settings.username.title"),
+                                                self.t("settings.username.desc"),
+                                            ))
                                             .child(self.input_control(&self.username_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text("内存 (MB)", "分配给游戏的最大堆内存"))
+                                            .child(row_text(
+                                                self.t("settings.memory.title"),
+                                                self.t("settings.memory.desc"),
+                                            ))
                                             .child(self.input_control(&self.memory_input)),
                                     ),
                             )
@@ -1770,22 +1928,28 @@ impl LauncherUi {
                                 panel()
                                     .child(
                                         row()
-                                            .child(row_text("Java 路径", "留空时自动查找可用 Java"))
+                                            .child(row_text(
+                                                self.t("settings.java.title"),
+                                                self.t("settings.java.desc"),
+                                            ))
                                             .child(self.input_control(&self.java_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
                                             .child(row_text(
-                                                "镜像地址",
-                                                "替换资源下载源，留空表示官方源",
+                                                self.t("settings.mirror.title"),
+                                                self.t("settings.mirror.desc"),
                                             ))
                                             .child(self.input_control(&self.mirror_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text("Maven 仓库", "自定义依赖仓库地址"))
+                                            .child(row_text(
+                                                self.t("settings.maven.title"),
+                                                self.t("settings.maven.desc"),
+                                            ))
                                             .child(self.input_control(&self.maven_input)),
                                     ),
                             )
@@ -1793,8 +1957,43 @@ impl LauncherUi {
                                 panel().child(
                                     row()
                                         .child(row_text(
-                                            "默认隔离运行新实例",
-                                            "每个实例使用独立目录，避免模组互相污染",
+                                            self.t("settings.language.title"),
+                                            self.t("settings.language.desc"),
+                                        ))
+                                        .child(
+                                            h_flex()
+                                                .flex_shrink_0()
+                                                .gap(px(2.))
+                                                .p(px(3.))
+                                                .rounded(px(9.))
+                                                .bg(skin::c(skin::PANEL))
+                                                .child(self.lang_option(
+                                                    "lang-zh",
+                                                    Lang::ZhCn,
+                                                    self.lang == Lang::ZhCn,
+                                                    cx,
+                                                ))
+                                                .child(self.lang_option(
+                                                    "lang-en",
+                                                    Lang::EnUs,
+                                                    self.lang == Lang::EnUs,
+                                                    cx,
+                                                ))
+                                                .child(self.lang_option(
+                                                    "lang-ja",
+                                                    Lang::JaJp,
+                                                    self.lang == Lang::JaJp,
+                                                    cx,
+                                                )),
+                                        ),
+                                ),
+                            )
+                            .child(
+                                panel().child(
+                                    row()
+                                        .child(row_text(
+                                            self.t("settings.isolate.title"),
+                                            self.t("settings.isolate.desc"),
                                         ))
                                         .child(
                                             Switch::new("settings-isolate")
@@ -1810,9 +2009,10 @@ impl LauncherUi {
                             )
                             .child(
                                 h_flex().w_full().justify_end().child(
-                                    primary_button("save-settings", "保存全局设置").on_click(
-                                        cx.listener(|this, _, _, cx| this.save_settings(cx)),
-                                    ),
+                                    primary_button("save-settings", self.t("settings.save"))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.save_settings(cx)),
+                                        ),
                                 ),
                             ),
                     ),
@@ -1826,25 +2026,37 @@ impl LauncherUi {
                 panel()
                     .child(
                         row()
-                            .child(row_text("MC 版本", "例如 1.20.1"))
+                            .child(row_text(
+                                self.t("install.version.title"),
+                                self.t("install.version.desc"),
+                            ))
                             .child(self.input_control(&self.install_version_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text("实例名称", "留空则使用版本号命名"))
+                            .child(row_text(
+                                self.t("install.name.title"),
+                                self.t("install.name.desc"),
+                            ))
                             .child(self.input_control(&self.install_name_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text("加载器", "fabric / forge / neoforge / quilt"))
+                            .child(row_text(
+                                self.t("install.loader.title"),
+                                self.t("install.loader.desc"),
+                            ))
                             .child(self.input_control(&self.install_loader_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text("加载器版本", "留空时使用最新版本"))
+                            .child(row_text(
+                                self.t("install.loader_version.title"),
+                                self.t("install.loader_version.desc"),
+                            ))
                             .child(self.input_control(&self.install_loader_version_input)),
                     ),
             )
@@ -1852,38 +2064,56 @@ impl LauncherUi {
                 panel()
                     .child(
                         row()
-                            .child(row_text("用户名", "启动游戏时使用的玩家名称"))
+                            .child(row_text(
+                                self.t("settings.username.title"),
+                                self.t("settings.username.desc"),
+                            ))
                             .child(self.input_control(&self.install_username_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text("内存 (MB)", "分配给游戏的最大堆内存"))
+                            .child(row_text(
+                                self.t("settings.memory.title"),
+                                self.t("settings.memory.desc"),
+                            ))
                             .child(self.input_control(&self.install_memory_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text("Java 路径", "留空时自动查找可用 Java"))
+                            .child(row_text(
+                                self.t("settings.java.title"),
+                                self.t("settings.java.desc"),
+                            ))
                             .child(self.input_control(&self.install_java_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text("镜像地址", "替换资源下载源"))
+                            .child(row_text(
+                                self.t("settings.mirror.title"),
+                                self.t("install.mirror.desc"),
+                            ))
                             .child(self.input_control(&self.install_mirror_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text("Maven 仓库", "自定义依赖仓库地址"))
+                            .child(row_text(
+                                self.t("settings.maven.title"),
+                                self.t("settings.maven.desc"),
+                            ))
                             .child(self.input_control(&self.install_maven_input)),
                     ),
             )
             .child(
                 panel().child(
                     row()
-                        .child(row_text("隔离运行", "实例使用独立目录，模组与存档互不影响"))
+                        .child(row_text(
+                            self.t("install.isolate.title"),
+                            self.t("install.isolate.desc"),
+                        ))
                         .child(
                             Switch::new("install-isolate")
                                 .checked(self.install_isolate)
@@ -1895,7 +2125,7 @@ impl LauncherUi {
                 ),
             )
             .child(h_flex().w_full().justify_end().child(
-                primary_button("install-run", "开始安装").on_click(
+                primary_button("install-run", self.t("install.run")).on_click(
                     cx.listener(|this, _, _, cx| this.install_version(cx)),
                 ),
             ))
@@ -1918,7 +2148,10 @@ impl LauncherUi {
                                 cx.listener(|this, _, _, cx| this.back_to_instances(cx)),
                             )),
                     )
-                    .child(page_title("实例设置", "这里的修改只对当前实例生效")),
+                    .child(page_title(
+                        self.t("instance_settings.title"),
+                        self.t("instance_settings.subtitle"),
+                    )),
             )
             .child(
                 div()
@@ -1933,41 +2166,61 @@ impl LauncherUi {
                             .child(
                                 panel()
                                     .child(
-                                        row().child(row_text("实例", self.cfg_name.clone())).child(
-                                            div()
-                                                .text_size(px(12.5))
-                                                .text_color(skin::c(skin::MUTED))
-                                                .child("覆盖全局设置"),
-                                        ),
+                                        row()
+                                            .child(row_text(
+                                                self.t("instance_settings.instance"),
+                                                self.cfg_name.clone(),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.5))
+                                                    .text_color(skin::c(skin::MUTED))
+                                                    .child(self.t("instance_settings.override")),
+                                            ),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text("用户名", "启动游戏时使用的玩家名称"))
+                                            .child(row_text(
+                                                self.t("settings.username.title"),
+                                                self.t("settings.username.desc"),
+                                            ))
                                             .child(self.input_control(&self.cfg_username_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text("内存 (MB)", "分配给游戏的最大堆内存"))
+                                            .child(row_text(
+                                                self.t("settings.memory.title"),
+                                                self.t("settings.memory.desc"),
+                                            ))
                                             .child(self.input_control(&self.cfg_memory_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text("Java 路径", "留空时使用全局设置"))
+                                            .child(row_text(
+                                                self.t("settings.java.title"),
+                                                self.t("instance_settings.java.desc"),
+                                            ))
                                             .child(self.input_control(&self.cfg_java_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text("镜像地址", "留空时使用全局设置"))
+                                            .child(row_text(
+                                                self.t("settings.mirror.title"),
+                                                self.t("instance_settings.mirror.desc"),
+                                            ))
                                             .child(self.input_control(&self.cfg_mirror_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text("Maven 仓库", "留空时使用全局设置"))
+                                            .child(row_text(
+                                                self.t("settings.maven.title"),
+                                                self.t("instance_settings.maven.desc"),
+                                            ))
                                             .child(self.input_control(&self.cfg_maven_input)),
                                     ),
                             )
@@ -1975,8 +2228,8 @@ impl LauncherUi {
                                 panel().child(
                                     row()
                                         .child(row_text(
-                                            "隔离运行",
-                                            "实例使用独立目录，模组与存档互不影响",
+                                            self.t("instance_settings.isolate.title"),
+                                            self.t("instance_settings.isolate.desc"),
                                         ))
                                         .child(
                                             Switch::new("cfg-isolate")
@@ -1991,7 +2244,7 @@ impl LauncherUi {
                                 ),
                             )
                             .child(h_flex().w_full().justify_end().child(
-                                primary_button("cfg-save", "保存实例设置").on_click(
+                                primary_button("cfg-save", self.t("instance_settings.save")).on_click(
                                     cx.listener(|this, _, _, cx| this.save_instance_settings(cx)),
                                 ),
                             )),
@@ -2028,18 +2281,19 @@ impl LauncherUi {
                 div()
                     .text_size(px(12.5))
                     .text_color(skin::c(skin::FAINT))
-                    .child("暂无任务"),
+                    .child(self.t("tasks.empty")),
             );
         }
 
         for task in self.tasks.iter().rev() {
             let id = task.id;
-            let (color, state_label) = match task.state {
-                TaskState::Running => (skin::BUSY, "运行中"),
-                TaskState::Success => (skin::OK, "完成"),
-                TaskState::Failed => (skin::DANGER_HOVER, "失败"),
-                TaskState::Cancelled => (skin::FAINT, "已取消"),
+            let color = match task.state {
+                TaskState::Running => skin::BUSY,
+                TaskState::Success => skin::OK,
+                TaskState::Failed => skin::DANGER_HOVER,
+                TaskState::Cancelled => skin::FAINT,
             };
+            let state_label = self.t(task_state_key(task.state));
             let selected = active == Some(id);
             let percent = task
                 .progress
@@ -2106,12 +2360,7 @@ impl LauncherUi {
 
         let mut detail = v_flex().flex_1().min_w_0().h_full().gap(px(14.));
         if let Some((id, title, state, progress, lines)) = selected {
-            let state_label = match state {
-                TaskState::Running => "运行中",
-                TaskState::Success => "完成",
-                TaskState::Failed => "失败",
-                TaskState::Cancelled => "已取消",
-            };
+            let state_label = self.t(task_state_key(state));
             let mut header = h_flex()
                 .w_full()
                 .items_center()
@@ -2132,12 +2381,15 @@ impl LauncherUi {
                             div()
                                 .text_size(px(12.))
                                 .text_color(skin::c(skin::FAINT))
-                                .child(format!("任务 #{id} · {state_label}")),
+                                .child(self.t_args(
+                                    "tasks.detail.header",
+                                    &[("id", &id.to_string()), ("state", state_label.as_ref())],
+                                )),
                         ),
                 );
             if state == TaskState::Running {
                 header = header.child(
-                    danger_button("task-cancel", "取消")
+                    danger_button("task-cancel", self.t("tasks.cancel"))
                         .on_click(cx.listener(move |this, _, _, cx| this.cancel_task(id, cx))),
                 );
             }
@@ -2191,7 +2443,7 @@ impl LauncherUi {
                     .text_size(px(11.5))
                     .text_color(skin::c(skin::MUTED))
                     .child(v_flex().gap(px(3.)).children(if lines.is_empty() {
-                        vec![SharedString::from("暂无日志")]
+                        vec![self.t("tasks.log.empty")]
                     } else {
                         lines
                     })),
@@ -2201,14 +2453,17 @@ impl LauncherUi {
                 div()
                     .text_size(px(12.5))
                     .text_color(skin::c(skin::FAINT))
-                    .child("选择左侧任务查看日志"),
+                    .child(self.t("tasks.detail.empty")),
             );
         }
 
         v_flex()
             .size_full()
             .gap(px(20.))
-            .child(page_title("任务", "查看正在运行和已完成的任务"))
+            .child(page_title(
+                self.t("page.tasks.title"),
+                self.t("page.tasks.subtitle"),
+            ))
             .child(
                 h_flex()
                     .flex_1()
