@@ -766,7 +766,7 @@ impl LauncherUi {
             String::from("--limit"),
             limit,
         ];
-        if self.download_tab >= 2 {
+        if matches!(self.download_tab, 2 | 4) {
             let loader = Self::value(&self.mod_loader_input, cx);
             push_option(&mut args, "--loader", &loader);
         }
@@ -1216,28 +1216,25 @@ fn row_text(title: impl Into<SharedString>, desc: impl Into<SharedString>) -> Di
         )
 }
 
+fn row_title(title: impl Into<SharedString>) -> Div {
+    div()
+        .min_w_0()
+        .text_size(px(13.5))
+        .font_medium()
+        .text_color(skin::c(skin::TEXT))
+        .child(title.into())
+}
+
 fn sep() -> Div {
     div().h(px(1.)).mx(px(20.)).bg(skin::c(skin::DIVIDER))
 }
 
-fn page_title(title: impl Into<SharedString>, subtitle: impl Into<SharedString>) -> Div {
-    let title = title.into();
-    let subtitle = subtitle.into();
-    v_flex()
-        .gap(px(4.))
-        .child(
-            div()
-                .text_size(px(20.))
-                .font_semibold()
-                .text_color(skin::c(skin::TEXT))
-                .child(title),
-        )
-        .child(
-            div()
-                .text_size(px(13.))
-                .text_color(skin::c(skin::MUTED))
-                .child(subtitle),
-        )
+fn page_title(title: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(20.))
+        .font_semibold()
+        .text_color(skin::c(skin::TEXT))
+        .child(title.into())
 }
 
 fn primary_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
@@ -1551,10 +1548,7 @@ impl LauncherUi {
                     .items_start()
                     .justify_between()
                     .gap(px(16.))
-                    .child(page_title(
-                        self.t("page.instances.title"),
-                        self.t("page.instances.subtitle"),
-                    ))
+                    .child(page_title(self.t("page.instances.title")))
                     .child(
                         h_flex()
                             .flex_shrink_0()
@@ -1579,6 +1573,8 @@ impl LauncherUi {
 
     fn render_download(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut body = v_flex().gap(px(16.));
+        let content_tab = self.download_tab;
+        let show_loader = content_tab == 2 || content_tab == 4;
         if self.download_tab == 0 {
             body = body.child(self.render_install_form(cx));
         } else if self.download_tab == 1 {
@@ -1587,28 +1583,19 @@ impl LauncherUi {
                     panel()
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.import.file.title"),
-                                    self.t("download.import.file.desc"),
-                                ))
+                                .child(row_title(self.t("download.import.file.title")))
                                 .child(self.input_control(&self.import_file_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.import.name.title"),
-                                    self.t("download.import.name.desc"),
-                                ))
+                                .child(row_title(self.t("download.import.name.title")))
                                 .child(self.input_control(&self.import_name_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.import.optional.title"),
-                                    self.t("download.import.optional.desc"),
-                                ))
+                                .child(row_title(self.t("download.import.optional.title")))
                                 .child(
                                     Switch::new("import-optional")
                                         .checked(self.import_optional)
@@ -1628,28 +1615,19 @@ impl LauncherUi {
                     panel()
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.pack.query.title"),
-                                    self.t("download.pack.query.desc"),
-                                ))
+                                .child(row_title(self.t("download.pack.query.title")))
                                 .child(self.input_control(&self.mod_query_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.version.title"),
-                                    self.t("download.version.desc"),
-                                ))
+                                .child(row_title(self.t("download.version.title")))
                                 .child(self.input_control(&self.mod_version_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.limit.title"),
-                                    self.t("download.limit.desc"),
-                                ))
+                                .child(row_title(self.t("download.limit.title")))
                                 .child(self.input_control(&self.mod_limit_input)),
                         ),
                 )
@@ -1661,10 +1639,7 @@ impl LauncherUi {
                 .child(
                     panel().child(
                         row()
-                            .child(row_text(
-                                self.t("download.pack.slug.title"),
-                                self.t("download.pack.slug.desc"),
-                            ))
+                            .child(row_title(self.t("download.pack.slug.title")))
                             .child(self.input_control(&self.mod_slug_input)),
                     ),
                 )
@@ -1674,42 +1649,86 @@ impl LauncherUi {
                     ),
                 ));
         } else {
+            let mut search = panel().child(
+                row()
+                    .child(row_title(self.t("download.pack.query.title")))
+                    .child(self.input_control(&self.mod_query_input)),
+            );
+            if show_loader {
+                let label = if content_tab == 4 {
+                    row_title(self.t("download.content.shader_loader.title"))
+                } else {
+                    row_title(self.t("download.content.loader.title"))
+                };
+                let control = if content_tab == 2 {
+                    let current = Self::value(&self.mod_loader_input, cx);
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap(px(2.))
+                        .p(px(3.))
+                        .rounded(px(9.))
+                        .bg(skin::c(skin::PANEL))
+                        .child(Self::loader_option(
+                            "mod-loader-fabric",
+                            "fabric",
+                            current == "fabric",
+                            self.mod_loader_input.clone(),
+                            cx,
+                        ))
+                        .child(Self::loader_option(
+                            "mod-loader-forge",
+                            "forge",
+                            current == "forge",
+                            self.mod_loader_input.clone(),
+                            cx,
+                        ))
+                        .child(Self::loader_option(
+                            "mod-loader-neoforge",
+                            "neoforge",
+                            current == "neoforge",
+                            self.mod_loader_input.clone(),
+                            cx,
+                        ))
+                } else if content_tab == 4 {
+                    let current = Self::value(&self.mod_loader_input, cx);
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap(px(2.))
+                        .p(px(3.))
+                        .rounded(px(9.))
+                        .bg(skin::c(skin::PANEL))
+                        .child(Self::loader_option(
+                            "shader-loader-iris",
+                            "iris",
+                            current == "iris",
+                            self.mod_loader_input.clone(),
+                            cx,
+                        ))
+                        .child(Self::loader_option(
+                            "shader-loader-optifine",
+                            "optifine",
+                            current == "optifine",
+                            self.mod_loader_input.clone(),
+                            cx,
+                        ))
+                } else {
+                    div().child(self.input_control(&self.mod_loader_input))
+                };
+                search = search.child(sep()).child(row().child(label).child(control));
+            }
             body = body
                 .child(
-                    panel()
-                        .child(
-                            row()
-                                .child(row_text(
-                                    self.t("download.pack.query.title"),
-                                    self.t("download.content.query.desc"),
-                                ))
-                                .child(self.input_control(&self.mod_query_input)),
-                        )
+                    search
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.content.loader.title"),
-                                    self.t("download.content.loader.desc"),
-                                ))
-                                .child(self.input_control(&self.mod_loader_input)),
-                        )
-                        .child(sep())
-                        .child(
-                            row()
-                                .child(row_text(
-                                    self.t("download.version.title"),
-                                    self.t("download.version.desc"),
-                                ))
+                                .child(row_title(self.t("download.version.title")))
                                 .child(self.input_control(&self.mod_version_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.limit.title"),
-                                    self.t("download.limit.desc"),
-                                ))
+                                .child(row_title(self.t("download.limit.title")))
                                 .child(self.input_control(&self.mod_limit_input)),
                         ),
                 )
@@ -1722,19 +1741,13 @@ impl LauncherUi {
                     panel()
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.pack.slug.title"),
-                                    self.t("download.content.slug.desc"),
-                                ))
+                                .child(row_title(self.t("download.pack.slug.title")))
                                 .child(self.input_control(&self.mod_slug_input)),
                         )
                         .child(sep())
                         .child(
                             row()
-                                .child(row_text(
-                                    self.t("download.content.instance.title"),
-                                    self.t("download.content.instance.desc"),
-                                ))
+                                .child(row_title(self.t("download.content.instance.title")))
                                 .child(self.input_control(&self.mod_instance_input)),
                         ),
                 )
@@ -1754,10 +1767,7 @@ impl LauncherUi {
                     .items_start()
                     .justify_between()
                     .gap(px(16.))
-                    .child(page_title(
-                        self.t("page.download.title"),
-                        self.t("page.download.subtitle"),
-                    ))
+                    .child(page_title(self.t("page.download.title")))
                     .child(
                         h_flex()
                             .flex_shrink_0()
@@ -1843,11 +1853,51 @@ impl LauncherUi {
             })
             .when(!active, |this| this.text_color(skin::c(skin::MUTED)))
             .cursor(CursorStyle::PointingHand)
-            .on_click(cx.listener(move |this, _event, _window, cx| {
+            .on_click(cx.listener(move |this, _event, window, cx| {
                 this.download_tab = index;
+                if index == 2 {
+                    let current = Self::value(&this.mod_loader_input, cx);
+                    if !matches!(current.as_str(), "fabric" | "forge" | "neoforge") {
+                        Self::set_input(&this.mod_loader_input, "fabric", window, cx);
+                    }
+                }
+                if index == 4 {
+                    let current = Self::value(&this.mod_loader_input, cx);
+                    if current != "iris" && current != "optifine" {
+                        Self::set_input(&this.mod_loader_input, "iris", window, cx);
+                    }
+                }
                 cx.notify();
             }))
             .child(label)
+    }
+
+    fn loader_option(
+        id: &'static str,
+        value: &'static str,
+        active: bool,
+        target: Entity<input::InputState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .h(px(26.))
+            .px(px(12.))
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .text_size(px(12.5))
+            .when(active, |this| {
+                this.bg(skin::c(skin::ACTIVE))
+                    .text_color(skin::c(skin::TEXT))
+            })
+            .when(!active, |this| this.text_color(skin::c(skin::MUTED)))
+            .cursor(CursorStyle::PointingHand)
+            .on_click(cx.listener(move |_this, _event, window, cx| {
+                Self::set_input(&target, if active { "" } else { value }, window, cx);
+                cx.notify();
+            }))
+            .child(value)
     }
 
     fn lang_option(
@@ -1881,10 +1931,7 @@ impl LauncherUi {
         v_flex()
             .size_full()
             .gap(px(20.))
-            .child(page_title(
-                self.t("page.settings.title"),
-                self.t("page.settings.subtitle"),
-            ))
+            .child(page_title(self.t("page.settings.title")))
             .child(
                 div()
                     .flex_1()
@@ -1899,28 +1946,19 @@ impl LauncherUi {
                                 panel()
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.game_dir.title"),
-                                                self.t("settings.game_dir.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.game_dir.title")))
                                             .child(self.input_control(&self.dir_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.username.title"),
-                                                self.t("settings.username.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.username.title")))
                                             .child(self.input_control(&self.username_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.memory.title"),
-                                                self.t("settings.memory.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.memory.title")))
                                             .child(self.input_control(&self.memory_input)),
                                     ),
                             )
@@ -1928,38 +1966,26 @@ impl LauncherUi {
                                 panel()
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.java.title"),
-                                                self.t("settings.java.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.java.title")))
                                             .child(self.input_control(&self.java_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.mirror.title"),
-                                                self.t("settings.mirror.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.mirror.title")))
                                             .child(self.input_control(&self.mirror_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.maven.title"),
-                                                self.t("settings.maven.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.maven.title")))
                                             .child(self.input_control(&self.maven_input)),
                                     ),
                             )
                             .child(
                                 panel().child(
                                     row()
-                                        .child(row_text(
-                                            self.t("settings.language.title"),
-                                            self.t("settings.language.desc"),
-                                        ))
+                                        .child(row_title(self.t("settings.language.title")))
                                         .child(
                                             h_flex()
                                                 .flex_shrink_0()
@@ -1991,10 +2017,7 @@ impl LauncherUi {
                             .child(
                                 panel().child(
                                     row()
-                                        .child(row_text(
-                                            self.t("settings.isolate.title"),
-                                            self.t("settings.isolate.desc"),
-                                        ))
+                                        .child(row_title(self.t("settings.isolate.title")))
                                         .child(
                                             Switch::new("settings-isolate")
                                                 .checked(self.isolate)
@@ -2020,43 +2043,60 @@ impl LauncherUi {
     }
 
     fn render_install_form(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let loader = Self::value(&self.install_loader_input, cx);
         v_flex()
             .gap(px(16.))
             .child(
                 panel()
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("install.version.title"),
-                                self.t("install.version.desc"),
-                            ))
+                            .child(row_title(self.t("install.version.title")))
                             .child(self.input_control(&self.install_version_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("install.name.title"),
-                                self.t("install.name.desc"),
-                            ))
+                            .child(row_title(self.t("install.name.title")))
                             .child(self.input_control(&self.install_name_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("install.loader.title"),
-                                self.t("install.loader.desc"),
-                            ))
-                            .child(self.input_control(&self.install_loader_input)),
+                            .child(row_title(self.t("install.loader.title")))
+                            .child(
+                                h_flex()
+                                    .flex_shrink_0()
+                                    .gap(px(2.))
+                                    .p(px(3.))
+                                    .rounded(px(9.))
+                                    .bg(skin::c(skin::PANEL))
+                                    .child(Self::loader_option(
+                                        "install-loader-fabric",
+                                        "fabric",
+                                        loader == "fabric",
+                                        self.install_loader_input.clone(),
+                                        cx,
+                                    ))
+                                    .child(Self::loader_option(
+                                        "install-loader-forge",
+                                        "forge",
+                                        loader == "forge",
+                                        self.install_loader_input.clone(),
+                                        cx,
+                                    ))
+                                    .child(Self::loader_option(
+                                        "install-loader-neoforge",
+                                        "neoforge",
+                                        loader == "neoforge",
+                                        self.install_loader_input.clone(),
+                                        cx,
+                                    )),
+                            ),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("install.loader_version.title"),
-                                self.t("install.loader_version.desc"),
-                            ))
+                            .child(row_title(self.t("install.loader_version.title")))
                             .child(self.input_control(&self.install_loader_version_input)),
                     ),
             )
@@ -2064,56 +2104,38 @@ impl LauncherUi {
                 panel()
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("settings.username.title"),
-                                self.t("settings.username.desc"),
-                            ))
+                            .child(row_title(self.t("settings.username.title")))
                             .child(self.input_control(&self.install_username_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("settings.memory.title"),
-                                self.t("settings.memory.desc"),
-                            ))
+                            .child(row_title(self.t("settings.memory.title")))
                             .child(self.input_control(&self.install_memory_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("settings.java.title"),
-                                self.t("settings.java.desc"),
-                            ))
+                            .child(row_title(self.t("settings.java.title")))
                             .child(self.input_control(&self.install_java_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("settings.mirror.title"),
-                                self.t("install.mirror.desc"),
-                            ))
+                            .child(row_title(self.t("settings.mirror.title")))
                             .child(self.input_control(&self.install_mirror_input)),
                     )
                     .child(sep())
                     .child(
                         row()
-                            .child(row_text(
-                                self.t("settings.maven.title"),
-                                self.t("settings.maven.desc"),
-                            ))
+                            .child(row_title(self.t("settings.maven.title")))
                             .child(self.input_control(&self.install_maven_input)),
                     ),
             )
             .child(
                 panel().child(
                     row()
-                        .child(row_text(
-                            self.t("install.isolate.title"),
-                            self.t("install.isolate.desc"),
-                        ))
+                        .child(row_title(self.t("install.isolate.title")))
                         .child(
                             Switch::new("install-isolate")
                                 .checked(self.install_isolate)
@@ -2148,10 +2170,7 @@ impl LauncherUi {
                                 cx.listener(|this, _, _, cx| this.back_to_instances(cx)),
                             )),
                     )
-                    .child(page_title(
-                        self.t("instance_settings.title"),
-                        self.t("instance_settings.subtitle"),
-                    )),
+                    .child(page_title(self.t("instance_settings.title"))),
             )
             .child(
                 div()
@@ -2181,56 +2200,38 @@ impl LauncherUi {
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.username.title"),
-                                                self.t("settings.username.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.username.title")))
                                             .child(self.input_control(&self.cfg_username_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.memory.title"),
-                                                self.t("settings.memory.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.memory.title")))
                                             .child(self.input_control(&self.cfg_memory_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.java.title"),
-                                                self.t("instance_settings.java.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.java.title")))
                                             .child(self.input_control(&self.cfg_java_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.mirror.title"),
-                                                self.t("instance_settings.mirror.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.mirror.title")))
                                             .child(self.input_control(&self.cfg_mirror_input)),
                                     )
                                     .child(sep())
                                     .child(
                                         row()
-                                            .child(row_text(
-                                                self.t("settings.maven.title"),
-                                                self.t("instance_settings.maven.desc"),
-                                            ))
+                                            .child(row_title(self.t("settings.maven.title")))
                                             .child(self.input_control(&self.cfg_maven_input)),
                                     ),
                             )
                             .child(
                                 panel().child(
                                     row()
-                                        .child(row_text(
-                                            self.t("instance_settings.isolate.title"),
-                                            self.t("instance_settings.isolate.desc"),
-                                        ))
+                                        .child(row_title(self.t("instance_settings.isolate.title")))
                                         .child(
                                             Switch::new("cfg-isolate")
                                                 .checked(self.cfg_isolate)
@@ -2460,10 +2461,7 @@ impl LauncherUi {
         v_flex()
             .size_full()
             .gap(px(20.))
-            .child(page_title(
-                self.t("page.tasks.title"),
-                self.t("page.tasks.subtitle"),
-            ))
+            .child(page_title(self.t("page.tasks.title")))
             .child(
                 h_flex()
                     .flex_1()
