@@ -1,6 +1,6 @@
 [package]
 name = "lyys_mc_launcher"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 edition = "2024"
 
 [dependencies]
@@ -8,11 +8,11 @@ serde_json = "1.0.154"
 md-5 = "0.11.0"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
-ureq = "3.5.1"
+ureq = "3.5.2"
 zip = "9.5.1"
-gpui = { version = "0.1.14", package = "gpui-fast" }
+gpui = { version = "0.1.15", package = "gpui-fast" }
 gpui-base = { version = "0.9.1", features = ["gpui-fast"] }
-gpui-fast-platform = "0.1.14"
+gpui-fast-platform = "0.1.15"
 gpui-component = { version = "0.9.1", features = ["gpui-fast"] }
 gpui-kit-assets = { version = "0.9.1", features = ["gpui-fast"] }
 smol = "2"

@@ -1,6 +1,6 @@
 # lyys_mc_launcher
 
-![License](https://img.shields.io/badge/License-GPL_v3-blue) ![Rust](https://img.shields.io/badge/Rust-1.85%2B-green) ![GPUI](https://img.shields.io/badge/GPUI-0.9.1-lightblue) ![Minecraft](https://img.shields.io/badge/Minecraft-Java_Edition-green) ![Platform](https://img.shields.io/badge/Platform-Windows_%7C_Linux-lightgrey) ![Version](https://img.shields.io/badge/Version-v0.0.1--alpha-red)
+![License](https://img.shields.io/badge/License-GPL_v3-blue) ![Rust](https://img.shields.io/badge/Rust-1.85%2B-green) ![GPUI](https://img.shields.io/badge/GPUI-0.9.1-lightblue) ![Minecraft](https://img.shields.io/badge/Minecraft-Java_Edition-green) ![Platform](https://img.shields.io/badge/Platform-Windows_%7C_Linux-lightgrey) ![Version](https://img.shields.io/badge/Version-v0.0.2--alpha-red)
 
 [简体中文](README.md) | [English](README.en.md) | [日本語](README.ja.md)
 
