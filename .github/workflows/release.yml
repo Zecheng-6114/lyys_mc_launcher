@@ -48,7 +48,21 @@ jobs:
         if: runner.os == 'Linux'
         run: tar -czf lyys_mc_launcher-${{ github.ref_name }}-linux.tar.gz -C target/release lyys_mc_launcher
 
+      - name: 读取更新日志
+        shell: bash
+        run: |
+          awk -v ver="${{ github.ref_name }}" '
+            index($0, "## [" ver "]") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found && /^\[[^]]*\]: / { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "详见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)" > release_notes.md
+          fi
+
       - name: 发布
         uses: softprops/action-gh-release@v2
         with:
           files: lyys_mc_launcher-${{ github.ref_name }}-*
+          body_path: release_notes.md
