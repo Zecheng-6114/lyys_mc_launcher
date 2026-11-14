@@ -97,3 +97,32 @@
    - 我有没有擅自编造 Commit 信息？格式是否符合规范？`push` 是否获得了单独授权？
 
 **判定规则**：任何一项自检未通过，必须推翻重写当前回复或中止当前操作。
+
+---
+
+## 第五部分：项目技术要点
+
+### 常用命令
+* 全量测试：`cargo test`；单测过滤：`cargo test <名字片段>`。测试在各模块 `#[cfg(test)]` 内，不依赖网络或外部服务。
+* 构建：`cargo build --release`，产物为 `target/release/lyys_mc_launcher`（Windows 带 `.exe`）。
+* 项目无 `rustfmt.toml`，格式按 rustfmt 默认配置。
+* CI 仅 `.github/workflows/release.yml`：推送 `v*` 标签时在 Windows / Linux 构建并发布，不运行测试。
+
+### 双模式与任务执行模型
+* 单一二进制：无参数启动 GUI，有参数走 CLI（`src/main.rs`）。
+* GUI 不直接调用业务函数，而是用 `current_exe()` 以子命令重新执行本程序完成每个任务，并注入环境变量 `LYYS_GUI=1`。
+* 子进程的 stdout/stderr 逐行显示在任务日志；以 `#progress <done>/<total>` 开头的行会被 GUI 解析为进度条（`download.rs` 仅在 `LYYS_GUI` 存在时输出该行）。新增带进度的操作时沿用此协议。
+* GUI 支持多任务并行；取消任务时 Windows 通过 `taskkill /T /F` 终止整棵进程树。
+
+### 多语言
+* 文案位于 `src/locales/{en-US,zh-CN,ja-JP}.json`，三份文件键集必须完全一致（`i18n` 测试会失败）。
+* 缺失键先回退 `en-US`，再回退为键名本身；带变量文案用 `{name}` 占位（`i18n::text_args`）。
+* GUI 内统一用 `self.t` / `self.t_args`；新增界面文案需同时补齐三份 JSON。CLI 用法或配置字段变化时，同步 README 的三种语言版本。
+
+### 容易踩坑的约定
+* `Cargo.toml` 中的 `gpui` 实际来自 `gpui-fast`（`package = "gpui-fast"`），排查时按此版本，而非上游 gpui 版本。
+* 组件 `IconName` 仅包含 `gpui-kit-assets` 的 `default-icons.txt` 中列出的图标（如 `ArrowDown`、`Settings`）；`IconName::Download` 不存在，引用会编译失败。
+* CLI 解析为手写实现（`src/cli.rs` 用 `windows(2)` 扫描）：新增参数需同时改对应 `parse_*`、`USAGE` 与 GUI 调用处 `start_task` 的参数。
+* 下载统一走 `download::download_all`（8 线程、`.part` 临时文件、sha1/sha512/大小校验、3 次重试）；镜像改写集中在 `Origins` / `rewrite`，Maven 只改写白名单主机。
+* 版本 JSON 合并 `inheritsFrom` 链后由 `version::integrate` 回写；改动合并逻辑会同时影响启动与加载器安装链路。
+* 整合包支持 Modrinth / CurseForge / MCBBS / Server；MultiMC 可识别但未实现，Quilt 一律拒绝；CurseForge 清单缺少 `fileName` / `url` 时需要环境变量 `CURSEFORGE_API_KEY`。
