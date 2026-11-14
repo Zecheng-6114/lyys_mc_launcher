@@ -169,6 +169,7 @@ pub struct LauncherUi {
     lang: Lang,
     language: Option<SharedString>,
     instances: Vec<InstanceRow>,
+    account: Option<SharedString>,
     tasks: Vec<TaskEntry>,
     active_task: Option<usize>,
     next_task_id: usize,
@@ -257,6 +258,7 @@ impl LauncherUi {
             lang,
             language: settings.language.clone().map(SharedString::from),
             instances: Vec::new(),
+            account: None,
             tasks: Vec::new(),
             active_task: None,
             next_task_id: 1,
@@ -366,6 +368,7 @@ impl LauncherUi {
     fn reload(&mut self, cx: &mut Context<Self>) {
         let dir = Self::value(&self.dir_input, cx);
         self.instances = list_instances(&dir);
+        self.account = crate::microsoft::account_name().map(SharedString::from);
         cx.notify();
     }
 
@@ -559,11 +562,13 @@ impl LauncherUi {
             dir,
             String::from("--name"),
             name.to_string(),
-            String::from("--username"),
-            params.username,
             String::from("--memory"),
             params.memory.unwrap_or(4096).to_string(),
         ];
+        if self.account.is_none() {
+            args.push(String::from("--username"));
+            args.push(params.username);
+        }
         if params.isolate {
             args.push(String::from("--isolate"));
         }
@@ -577,6 +582,38 @@ impl LauncherUi {
             Some(SharedString::from(name)),
             args,
             false,
+            None,
+            cx,
+        );
+    }
+
+    fn login_microsoft(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.running_task_for(ACCOUNT_TASK) {
+            self.active_task = Some(id);
+            cx.notify();
+            return;
+        }
+        self.start_task(
+            self.t("task.title.login"),
+            Some(SharedString::from(ACCOUNT_TASK)),
+            vec![String::from("login")],
+            true,
+            None,
+            cx,
+        );
+    }
+
+    fn logout_microsoft(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.running_task_for(ACCOUNT_TASK) {
+            self.active_task = Some(id);
+            cx.notify();
+            return;
+        }
+        self.start_task(
+            self.t("task.title.logout"),
+            Some(SharedString::from(ACCOUNT_TASK)),
+            vec![String::from("logout")],
+            true,
             None,
             cx,
         );
@@ -888,6 +925,8 @@ struct LaunchParams {
     maven: String,
     isolate: bool,
 }
+
+const ACCOUNT_TASK: &str = "microsoft";
 
 fn input(
     window: &mut Window,
@@ -1943,6 +1982,13 @@ impl LauncherUi {
                         v_flex()
                             .gap(px(16.))
                             .child(
+                                panel().child(
+                                    row()
+                                        .child(row_title(self.t("settings.account.title")))
+                                        .child(self.account_controls(cx)),
+                                ),
+                            )
+                            .child(
                                 panel()
                                     .child(
                                         row()
@@ -2040,6 +2086,42 @@ impl LauncherUi {
                             ),
                     ),
             )
+    }
+
+    fn account_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let logged_in = self.account.is_some();
+        let name = self
+            .account
+            .clone()
+            .unwrap_or_else(|| self.t("settings.account.none"));
+        h_flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(10.))
+            .child(
+                div()
+                    .max_w(px(220.))
+                    .truncate()
+                    .text_size(px(13.))
+                    .text_color(skin::c(if logged_in {
+                        skin::TEXT
+                    } else {
+                        skin::MUTED
+                    }))
+                    .child(name),
+            )
+            .child(
+                text_button("login-microsoft", self.t("settings.account.login")).on_click(
+                    cx.listener(|this, _, _, cx| this.login_microsoft(cx)),
+                ),
+            )
+            .when(logged_in, |this| {
+                this.child(
+                    danger_button("logout-microsoft", self.t("settings.account.logout")).on_click(
+                        cx.listener(|this, _, _, cx| this.logout_microsoft(cx)),
+                    ),
+                )
+            })
     }
 
     fn render_install_form(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

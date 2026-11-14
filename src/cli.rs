@@ -6,14 +6,17 @@ pub enum Command {
     Search(SearchCli),
     Add(AddCli),
     Import(ImportCli),
+    Login,
+    Logout,
 }
 
 pub struct LaunchCli {
     pub mc_dir: String,
     pub instance: String,
-    pub username: String,
+    pub username: Option<String>,
     pub memory_mb: u32,
     pub isolate: bool,
+    pub offline: bool,
     pub mirror: Option<String>,
     pub maven: Option<String>,
     pub java: Option<String>,
@@ -64,11 +67,13 @@ pub struct DownloadCli {
 
 const USAGE: &str = concat!(
     "usage:\n",
-    "  launch: lyys_mc_launcher launch --dir <game_dir> --name <instance> --username <name> [--memory <MB>] [--isolate] [--mirror <url>] [--maven <url>] [--java <path>]\n",
+    "  launch: lyys_mc_launcher launch --dir <game_dir> --name <instance> [--username <name>] [--memory <MB>] [--isolate] [--offline] [--mirror <url>] [--maven <url>] [--java <path>]\n",
     "  download: lyys_mc_launcher download --dir <game_dir> --version <version> [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--name <instance>] [--java <path>] [--mirror <url>] [--maven <url>]\n",
     "  search: lyys_mc_launcher search --query <text> --type <mod|modpack|resourcepack|shader|datapack> [--loader <a,b>] [--version <x,y>] [--limit <n>]\n",
     "  add:    lyys_mc_launcher add --dir <game_dir> --name <instance> --slug <slug> --type <kind> [--with-optional]\n",
-    "  import: lyys_mc_launcher import --dir <game_dir> (--file <archive> | --url <url> | --modrinth <slug>) [--pack-version <id>] [--name <instance>] [--java <path>] [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--with-optional] [--dry-run] [--mirror <url>] [--maven <url>]",
+    "  import: lyys_mc_launcher import --dir <game_dir> (--file <archive> | --url <url> | --modrinth <slug>) [--pack-version <id>] [--name <instance>] [--java <path>] [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--with-optional] [--dry-run] [--mirror <url>] [--maven <url>]\n",
+    "  login:  lyys_mc_launcher login (Microsoft device code flow)\n",
+    "  logout: lyys_mc_launcher logout",
 );
 
 pub fn parse() -> Command {
@@ -81,6 +86,8 @@ pub fn parse() -> Command {
         Some("search") => Command::Search(parse_search(rest)),
         Some("add") => Command::Add(parse_add(rest)),
         Some("import") => Command::Import(parse_import(rest)),
+        Some("login") => Command::Login,
+        Some("logout") => Command::Logout,
         _ => {
             println!("{USAGE}");
             std::process::exit(0);
@@ -110,6 +117,7 @@ fn parse_launch(rest: &[String]) -> LaunchCli {
         }
     }
     let isolate = rest.iter().any(|a| a == "--isolate");
+    let offline = rest.iter().any(|a| a == "--offline");
 
     let mut missing = Vec::new();
     if mc_dir.is_none() {
@@ -117,9 +125,6 @@ fn parse_launch(rest: &[String]) -> LaunchCli {
     }
     if instance.is_none() {
         missing.push("--name");
-    }
-    if username.is_none() {
-        missing.push("--username");
     }
     if !missing.is_empty() {
         eprintln!(
@@ -136,9 +141,10 @@ fn parse_launch(rest: &[String]) -> LaunchCli {
     LaunchCli {
         mc_dir,
         instance: instance.unwrap(),
-        username: username.unwrap(),
+        username,
         memory_mb,
         isolate,
+        offline,
         mirror,
         maven,
         java,

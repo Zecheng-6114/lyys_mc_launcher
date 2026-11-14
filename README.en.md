@@ -17,6 +17,7 @@ A Minecraft launcher built with Rust and GPUI, offering both a graphical interfa
 - **Mirror acceleration**: `--mirror` / `--maven` rewrite Mojang resource and Maven repository download sources
 - **Integrity checks**: downloads are verified with SHA1 / SHA512 and retried on failure
 - **Offline play**: derives an offline UUID from the username
+- **Microsoft sign-in**: official login via the device code flow with automatic token refresh; when signed in, launching uses the official identity automatically
 - **Multilingual**: Simplified Chinese / English / Japanese
 - **Parallel tasks**: the graphical interface supports running multiple tasks in parallel with live logs
 
@@ -42,11 +43,13 @@ Run the executable without arguments to open the graphical interface.
 ### Command line
 
 ```text
-launch:   lyys_mc_launcher launch --dir <game_dir> --name <instance> --username <name> [--memory <MB>] [--isolate] [--mirror <url>] [--maven <url>] [--java <path>]
+launch:   lyys_mc_launcher launch --dir <game_dir> --name <instance> [--username <name>] [--memory <MB>] [--isolate] [--offline] [--mirror <url>] [--maven <url>] [--java <path>]
 download: lyys_mc_launcher download --dir <game_dir> --version <version> [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--name <instance>] [--java <path>] [--mirror <url>] [--maven <url>]
 search:   lyys_mc_launcher search --query <text> --type <mod|modpack|resourcepack|shader|datapack> [--loader <a,b>] [--version <x,y>] [--limit <n>]
 add:      lyys_mc_launcher add --dir <game_dir> --name <instance> --slug <slug> --type <kind> [--with-optional]
 import:   lyys_mc_launcher import --dir <game_dir> (--file <archive> | --url <url> | --modrinth <slug>) [--pack-version <id>] [--name <instance>] [--java <path>] [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--with-optional] [--dry-run] [--mirror <url>] [--maven <url>]
+login:    lyys_mc_launcher login
+logout:   lyys_mc_launcher logout
 ```
 
 Examples:
@@ -58,6 +61,9 @@ lyys_mc_launcher download --dir D:\game\minecraft --version 1.21.4
 # Add Fabric on top of that instance and launch
 lyys_mc_launcher download --dir D:\game\minecraft --version 1.21.4 --loader fabric --name 1.21.4-fabric
 lyys_mc_launcher launch --dir D:\game\minecraft --name 1.21.4-fabric --username Steve --isolate
+
+# Sign in with a Microsoft account (open the link in a browser and enter the code)
+lyys_mc_launcher login
 
 # Import a modpack from Modrinth
 lyys_mc_launcher import --dir D:\game\minecraft --modrinth <pack-slug>
@@ -84,6 +90,7 @@ Each instance can also have its own configuration:
 
 - `versions/<instance>/launch.json`: per-instance launch settings (username, memory, Java, mirrors, isolation)
 - `versions/<instance>/lyys-instance.json`: instance metadata (isolation flag, modpack provenance)
+- `<base dir>/lyys_mc_launcher/account.json`: Microsoft sign-in tokens (written by `login`, used automatically at launch)
 
 Run logs are written to `<base dir>/lyys_mc_launcher/log/`.
 
@@ -105,6 +112,7 @@ src/
 ├── modpack.rs     # Modpack import (modpack/ implements each provider)
 ├── instance.rs    # Instance configuration and isolation
 ├── launch.rs      # Launch argument construction
+├── microsoft.rs   # Microsoft sign-in (device code flow)
 └── account.rs     # Offline UUID
 ```
 

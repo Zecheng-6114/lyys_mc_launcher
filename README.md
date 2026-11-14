@@ -17,6 +17,7 @@
 - **镜像加速**：`--mirror` / `--maven` 可重写 Mojang 资源与 Maven 库下载源
 - **完整性校验**：下载文件带 SHA1 / SHA512 校验与重试
 - **离线启动**：由用户名派生离线 UUID
+- **正版登录**：微软设备码流程登录，令牌自动续期；已登录时启动自动使用正版身份，`--offline` / `--username` 可强制离线
 - **多语言**：简体中文 / English / 日本語
 - **任务并行**：图形界面支持多任务并行执行与实时日志
 
@@ -42,11 +43,13 @@ cargo build --release
 ### 命令行
 
 ```text
-launch:   lyys_mc_launcher launch --dir <game_dir> --name <instance> --username <name> [--memory <MB>] [--isolate] [--mirror <url>] [--maven <url>] [--java <path>]
+launch:   lyys_mc_launcher launch --dir <game_dir> --name <instance> [--username <name>] [--memory <MB>] [--isolate] [--offline] [--mirror <url>] [--maven <url>] [--java <path>]
 download: lyys_mc_launcher download --dir <game_dir> --version <version> [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--name <instance>] [--java <path>] [--mirror <url>] [--maven <url>]
 search:   lyys_mc_launcher search --query <text> --type <mod|modpack|resourcepack|shader|datapack> [--loader <a,b>] [--version <x,y>] [--limit <n>]
 add:      lyys_mc_launcher add --dir <game_dir> --name <instance> --slug <slug> --type <kind> [--with-optional]
 import:   lyys_mc_launcher import --dir <game_dir> (--file <archive> | --url <url> | --modrinth <slug>) [--pack-version <id>] [--name <instance>] [--java <path>] [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--with-optional] [--dry-run] [--mirror <url>] [--maven <url>]
+login:    lyys_mc_launcher login
+logout:   lyys_mc_launcher logout
 ```
 
 示例：
@@ -58,6 +61,9 @@ lyys_mc_launcher download --dir D:\game\minecraft --version 1.21.4
 # 在该实例上叠加 Fabric 并启动
 lyys_mc_launcher download --dir D:\game\minecraft --version 1.21.4 --loader fabric --name 1.21.4-fabric
 lyys_mc_launcher launch --dir D:\game\minecraft --name 1.21.4-fabric --username Steve --isolate
+
+# 微软正版登录（浏览器打开链接并输入代码后自动完成）
+lyys_mc_launcher login
 
 # 从 Modrinth 导入整合包
 lyys_mc_launcher import --dir D:\game\minecraft --modrinth <pack-slug>
@@ -84,6 +90,7 @@ lyys_mc_launcher import --dir D:\game\minecraft --modrinth <pack-slug>
 
 - `versions/<实例>/launch.json`：实例级启动参数（用户名、内存、Java、镜像、隔离）
 - `versions/<实例>/lyys-instance.json`：实例元数据（隔离标记、整合包来源记录）
+- `<基目录>/lyys_mc_launcher/account.json`：微软正版登录令牌（由 `login` 写入，启动时自动使用）
 
 运行日志写入 `<基目录>/lyys_mc_launcher/log/`。
 
@@ -105,6 +112,7 @@ src/
 ├── modpack.rs     # 整合包导入（modpack/ 为各 provider 实现）
 ├── instance.rs    # 实例配置与隔离
 ├── launch.rs      # 启动参数构建
+├── microsoft.rs   # 微软正版登录（设备码流程）
 └── account.rs     # 离线 UUID
 ```
 

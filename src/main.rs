@@ -8,6 +8,7 @@ mod instance;
 mod launch;
 mod loader;
 mod metadata;
+mod microsoft;
 mod modpack;
 mod modrinth;
 mod version;
@@ -30,6 +31,8 @@ fn main() {
             cli::Command::Search(c) => run_search(&c),
             cli::Command::Add(c) => run_add(&c),
             cli::Command::Import(c) => run_import(&c),
+            cli::Command::Login => run_login(),
+            cli::Command::Logout => run_logout(),
         }
         return;
     }
@@ -37,6 +40,26 @@ fn main() {
     if let Err(error) = gui::run() {
         eprintln!("gui error: {error}");
         std::process::exit(1);
+    }
+}
+
+fn run_login() {
+    match microsoft::login() {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("login failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_logout() {
+    match microsoft::logout() {
+        Ok(()) => println!("logged out"),
+        Err(e) => {
+            eprintln!("logout failed: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -316,6 +339,14 @@ fn run_launch(c: &LaunchCli) {
         return;
     }
 
+    let (username, uuid, access_token) = match resolve_identity(c) {
+        Ok(identity) => identity,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+
     if let Err(e) = download::ensure_version_files(mc_dir, version, &resolved.jar_id, &origins) {
         eprintln!("failed to complete files: {}", e);
         return;
@@ -337,9 +368,9 @@ fn run_launch(c: &LaunchCli) {
 
     let opts = LaunchOptions {
         memory_mb: c.memory_mb,
-        username: c.username.clone(),
-        uuid: offline_uuid(&c.username),
-        access_token: String::from("0"),
+        username,
+        uuid,
+        access_token,
         game_dir,
     };
 
@@ -355,4 +386,23 @@ fn run_launch(c: &LaunchCli) {
         Ok(status) => eprintln!("game exited with {status}"),
         Err(e) => eprintln!("failed to launch {java}: {e}"),
     }
+}
+
+fn resolve_identity(c: &LaunchCli) -> Result<(String, String, String), String> {
+    if let Some(name) = &c.username {
+        return Ok((name.clone(), offline_uuid(name), String::from("0")));
+    }
+
+    if c.offline {
+        return Err(String::from("--offline requires --username"));
+    }
+
+    if let Some(mut account) = microsoft::load_account() {
+        microsoft::ensure_fresh(&mut account)?;
+        return Ok((account.name, account.uuid, account.access_token));
+    }
+
+    Err(String::from(
+        "no Microsoft account: run `lyys_mc_launcher login` first, or pass --username <name> for offline mode",
+    ))
 }

@@ -17,6 +17,7 @@ Rust と GPUI で構築された Minecraft ランチャー。グラフィカル�
 - **ミラー加速**：`--mirror` / `--maven` で Mojang リソースおよび Maven リポジトリのダウンロードソースを書き換え
 - **整合性チェック**：ダウンロードファイルは SHA1 / SHA512 検証とリトライ付き
 - **オフライン起動**：ユーザー名からオフライン UUID を生成
+- **正規ログイン**：Microsoft のデバイスコードフローでログイン。トークンは自動更新され、ログイン済みなら起動時に正規アカウントを自動使用
 - **多言語対応**：簡体字中国語 / 英語 / 日本語
 - **並行タスク**：GUI は複数タスクの並行実行とリアルタイムログに対応
 
@@ -42,11 +43,13 @@ cargo build --release
 ### コマンドライン
 
 ```text
-launch:   lyys_mc_launcher launch --dir <game_dir> --name <instance> --username <name> [--memory <MB>] [--isolate] [--mirror <url>] [--maven <url>] [--java <path>]
+launch:   lyys_mc_launcher launch --dir <game_dir> --name <instance> [--username <name>] [--memory <MB>] [--isolate] [--offline] [--mirror <url>] [--maven <url>] [--java <path>]
 download: lyys_mc_launcher download --dir <game_dir> --version <version> [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--name <instance>] [--java <path>] [--mirror <url>] [--maven <url>]
 search:   lyys_mc_launcher search --query <text> --type <mod|modpack|resourcepack|shader|datapack> [--loader <a,b>] [--version <x,y>] [--limit <n>]
 add:      lyys_mc_launcher add --dir <game_dir> --name <instance> --slug <slug> --type <kind> [--with-optional]
 import:   lyys_mc_launcher import --dir <game_dir> (--file <archive> | --url <url> | --modrinth <slug>) [--pack-version <id>] [--name <instance>] [--java <path>] [--loader <fabric|forge|neoforge>] [--loader-version <v>] [--with-optional] [--dry-run] [--mirror <url>] [--maven <url>]
+login:    lyys_mc_launcher login
+logout:   lyys_mc_launcher logout
 ```
 
 例：
@@ -58,6 +61,9 @@ lyys_mc_launcher download --dir D:\game\minecraft --version 1.21.4
 # そのインスタンスに Fabric を追加して起動
 lyys_mc_launcher download --dir D:\game\minecraft --version 1.21.4 --loader fabric --name 1.21.4-fabric
 lyys_mc_launcher launch --dir D:\game\minecraft --name 1.21.4-fabric --username Steve --isolate
+
+# Microsoft アカウントでログイン（ブラウザでリンクを開きコードを入力）
+lyys_mc_launcher login
 
 # Modrinth から統合パックをインポート
 lyys_mc_launcher import --dir D:\game\minecraft --modrinth <pack-slug>
@@ -84,6 +90,7 @@ lyys_mc_launcher import --dir D:\game\minecraft --modrinth <pack-slug>
 
 - `versions/<インスタンス>/launch.json`：インスタンスごとの起動設定（ユーザー名、メモリ、Java、ミラー、分離）
 - `versions/<インスタンス>/lyys-instance.json`：インスタンスのメタデータ（分離フラグ、統合パックの記録）
+- `<基準ディレクトリ>/lyys_mc_launcher/account.json`：Microsoft ログイントークン（`login` で書き込み、起動時に自動使用）
 
 実行ログは `<基準ディレクトリ>/lyys_mc_launcher/log/` に書き込まれます。
 
@@ -105,6 +112,7 @@ src/
 ├── modpack.rs     # 統合パックのインポート（modpack/ は各プロバイダーの実装）
 ├── instance.rs    # インスタンス設定と分離
 ├── launch.rs      # 起動引数の構築
+├── microsoft.rs   # Microsoft 正規ログイン（デバイスコードフロー）
 └── account.rs     # オフライン UUID
 ```
 
