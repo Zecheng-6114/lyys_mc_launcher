@@ -1,0 +1,6 @@
+[package]
+name = "lyys_mc_launcher"
+version = "0.0.1-alpha"
+edition = "2024"
+
+[dependencies]
