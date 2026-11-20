@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use mc_launcher_core::account::Account;
@@ -29,6 +29,7 @@ pub struct LaunchRequest<'a> {
     pub account: LaunchAccount<'a>,
     pub java: Option<&'a Path>,
     pub game_dir: Option<&'a Path>,
+    pub isolated: bool,
 }
 
 pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
@@ -37,13 +38,7 @@ pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
     let options = LaunchOptions {
         account: core_account(&request.account),
         java_executable: request.java.map(Path::to_path_buf),
-        // 原版启动器把游戏目录固定在 .minecraft 根目录，存档与资源跨版本共享
-        game_directory: Some(
-            request
-                .game_dir
-                .unwrap_or(request.minecraft_dir)
-                .to_path_buf(),
-        ),
+        game_directory: Some(game_directory(&request)),
         launcher_name: LAUNCHER_NAME.to_owned(),
         launcher_version: env!("CARGO_PKG_VERSION").to_owned(),
         ..Default::default()
@@ -55,6 +50,20 @@ pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
         .envs(command.env)
         .spawn()
         .map_err(LaunchError::Spawn)
+}
+
+fn game_directory(request: &LaunchRequest<'_>) -> PathBuf {
+    if let Some(dir) = request.game_dir {
+        return dir.to_path_buf();
+    }
+    if request.isolated {
+        return request
+            .minecraft_dir
+            .join("versions")
+            .join(request.version_id);
+    }
+    // 原版启动器把游戏目录固定在 .minecraft 根目录，存档与资源跨版本共享
+    request.minecraft_dir.to_path_buf()
 }
 
 fn core_account(account: &LaunchAccount<'_>) -> Account {

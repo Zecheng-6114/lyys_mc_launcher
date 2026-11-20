@@ -111,7 +111,6 @@ impl Auth {
         self.store.remove(uuid)
     }
 
-    #[allow(dead_code)]
     pub async fn current_game_token(&self) -> Result<GameToken, AuthError> {
         let mut account = match self.load_active()? {
             StoredAccount::Microsoft(account) => account,
