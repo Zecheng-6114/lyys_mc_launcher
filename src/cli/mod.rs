@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
+use crate::core::install;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
 
 const USAGE: &str = "usage:
@@ -12,9 +13,11 @@ const USAGE: &str = "usage:
   lyys_mc_launcher account use <uuid>
   lyys_mc_launcher account remove <uuid>
   lyys_mc_launcher account current
+  lyys_mc_launcher install <version> [--minecraft-dir <dir>]
   lyys_mc_launcher launch <version> [--minecraft-dir <dir>] [--game-dir <dir>] [--java <path>] [--isolate]";
 
 const ACCOUNT_COMMAND: &str = "account";
+const INSTALL_COMMAND: &str = "install";
 const LAUNCH_COMMAND: &str = "launch";
 const DEFAULT_MINECRAFT_DIR: &str = ".minecraft";
 
@@ -24,8 +27,12 @@ pub enum CliError {
     Auth(#[from] AuthError),
     #[error(transparent)]
     Launch(#[from] LaunchError),
+    #[error(transparent)]
+    Core(#[from] mc_launcher_core::LauncherError),
     #[error("the game exited with {0}")]
     Game(std::process::ExitStatus),
+    #[error("install task failed: {0}")]
+    Task(String),
 }
 
 pub async fn run() -> Result<(), CliError> {
@@ -35,6 +42,7 @@ pub async fn run() -> Result<(), CliError> {
         .ok_or_else(|| AuthError::InvalidArgument(USAGE.to_owned()))?;
     match command.as_str() {
         ACCOUNT_COMMAND => run_account(&mut args).await,
+        INSTALL_COMMAND => run_install(&mut args).await,
         LAUNCH_COMMAND => run_launch(&mut args).await,
         other => {
             Err(AuthError::InvalidArgument(format!("unknown command {other}\n{USAGE}")).into())
@@ -96,6 +104,35 @@ async fn run_account(args: &mut impl Iterator<Item = String>) -> Result<(), CliE
     Ok(())
 }
 
+async fn run_install(args: &mut impl Iterator<Item = String>) -> Result<(), CliError> {
+    let version_id = args
+        .next()
+        .ok_or_else(|| AuthError::InvalidArgument(format!("missing version\n{USAGE}")))?;
+    let mut minecraft_dir = None;
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--minecraft-dir" => {
+                minecraft_dir = Some(PathBuf::from(take_option_value(args, &option)?))
+            }
+            other => {
+                return Err(AuthError::InvalidArgument(format!(
+                    "unknown install option {other}\n{USAGE}"
+                ))
+                .into());
+            }
+        }
+    }
+    let minecraft_dir = resolve_minecraft_dir(minecraft_dir)?;
+    // 核心库的下载走阻塞式 HTTP 客户端，放在阻塞线程池里执行，避免和异步运行时互相卡住
+    let install_dir = minecraft_dir.clone();
+    let install_version = version_id.clone();
+    tokio::task::spawn_blocking(move || install::install(&install_dir, &install_version))
+        .await
+        .map_err(|error| CliError::Task(error.to_string()))??;
+    println!("installed {} into {}", version_id, minecraft_dir.display());
+    Ok(())
+}
+
 async fn run_launch(args: &mut impl Iterator<Item = String>) -> Result<(), CliError> {
     let version_id = args
         .next()
@@ -126,12 +163,7 @@ async fn run_launch(args: &mut impl Iterator<Item = String>) -> Result<(), CliEr
         )
         .into());
     }
-    let minecraft_dir = match minecraft_dir {
-        Some(dir) => dir,
-        None => std::env::current_dir()
-            .map_err(AuthError::from)?
-            .join(DEFAULT_MINECRAFT_DIR),
-    };
+    let minecraft_dir = resolve_minecraft_dir(minecraft_dir)?;
 
     let auth = Auth::new()?;
     let session = auth.refresh_current().await?;
@@ -157,6 +189,13 @@ async fn run_launch(args: &mut impl Iterator<Item = String>) -> Result<(), CliEr
         return Err(CliError::Game(status));
     }
     Ok(())
+}
+
+fn resolve_minecraft_dir(dir: Option<PathBuf>) -> Result<PathBuf, AuthError> {
+    match dir {
+        Some(dir) => Ok(dir),
+        None => Ok(std::env::current_dir()?.join(DEFAULT_MINECRAFT_DIR)),
+    }
 }
 
 fn take_option_value(

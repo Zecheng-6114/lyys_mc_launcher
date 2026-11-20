@@ -1,2 +1,3 @@
 pub mod auth;
+pub mod install;
 pub mod launch;
