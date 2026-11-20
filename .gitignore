@@ -3,3 +3,6 @@
 
 # IDE
 /.idea
+
+# Launcher data
+/.lyysml
