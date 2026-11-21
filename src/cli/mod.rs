@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
 use crate::core::install;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
+use crate::gui;
 
 const DEFAULT_MINECRAFT_DIR: &str = ".minecraft";
 
@@ -21,13 +22,15 @@ pub enum CliError {
     Game(std::process::ExitStatus),
     #[error("install task failed: {0}")]
     Task(String),
+    #[error("gui failed: {0}")]
+    Gui(String),
 }
 
 #[derive(Parser)]
 #[command(version, about = "LYYS Minecraft launcher")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -35,6 +38,7 @@ enum Command {
     Account(AccountArgs),
     Install(InstallArgs),
     Launch(LaunchArgs),
+    Gui,
 }
 
 #[derive(Args)]
@@ -75,9 +79,10 @@ struct LaunchArgs {
 
 pub async fn run() -> Result<(), CliError> {
     match Cli::parse().command {
-        Command::Account(args) => run_account(args.action).await,
-        Command::Install(args) => run_install(args).await,
-        Command::Launch(args) => run_launch(args).await,
+        Some(Command::Account(args)) => run_account(args.action).await,
+        Some(Command::Install(args)) => run_install(args).await,
+        Some(Command::Launch(args)) => run_launch(args).await,
+        Some(Command::Gui) | None => gui::run().map_err(CliError::Gui),
     }
 }
 
