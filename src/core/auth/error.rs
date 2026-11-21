@@ -30,6 +30,4 @@ pub enum AuthError {
     InvalidName(String),
     #[error("offline accounts have no game token")]
     OfflineAccount,
-    #[error("invalid argument: {0}")]
-    InvalidArgument(String),
 }

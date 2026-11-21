@@ -1,5 +1,6 @@
 mod cli;
 mod core;
+mod gui;
 
 use std::process::ExitCode;
 

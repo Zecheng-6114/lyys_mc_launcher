@@ -1,21 +1,13 @@
 use std::path::PathBuf;
 
+use clap::{Args, Parser, Subcommand};
 use thiserror::Error;
 
 use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
+use crate::core::install;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
+use crate::gui;
 
-const USAGE: &str = "usage:
-  lyys_mc_launcher account login
-  lyys_mc_launcher account offline <name>
-  lyys_mc_launcher account list
-  lyys_mc_launcher account use <uuid>
-  lyys_mc_launcher account remove <uuid>
-  lyys_mc_launcher account current
-  lyys_mc_launcher launch <version> [--minecraft-dir <dir>] [--game-dir <dir>] [--java <path>] [--isolate]";
-
-const ACCOUNT_COMMAND: &str = "account";
-const LAUNCH_COMMAND: &str = "launch";
 const DEFAULT_MINECRAFT_DIR: &str = ".minecraft";
 
 #[derive(Debug, Error)]
@@ -24,31 +16,80 @@ pub enum CliError {
     Auth(#[from] AuthError),
     #[error(transparent)]
     Launch(#[from] LaunchError),
+    #[error(transparent)]
+    Core(#[from] mc_launcher_core::LauncherError),
     #[error("the game exited with {0}")]
     Game(std::process::ExitStatus),
+    #[error("install task failed: {0}")]
+    Task(String),
+    #[error("gui failed: {0}")]
+    Gui(String),
+}
+
+#[derive(Parser)]
+#[command(version, about = "LYYS Minecraft launcher")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Account(AccountArgs),
+    Install(InstallArgs),
+    Launch(LaunchArgs),
+    Gui,
+}
+
+#[derive(Args)]
+struct AccountArgs {
+    #[command(subcommand)]
+    action: AccountAction,
+}
+
+#[derive(Subcommand)]
+enum AccountAction {
+    Login,
+    Offline { name: String },
+    List,
+    Use { uuid: String },
+    Remove { uuid: String },
+    Current,
+}
+
+#[derive(Args)]
+struct InstallArgs {
+    version: String,
+    #[arg(long)]
+    minecraft_dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct LaunchArgs {
+    version: String,
+    #[arg(long)]
+    minecraft_dir: Option<PathBuf>,
+    #[arg(long)]
+    game_dir: Option<PathBuf>,
+    #[arg(long)]
+    java: Option<PathBuf>,
+    #[arg(long, conflicts_with = "game_dir")]
+    isolate: bool,
 }
 
 pub async fn run() -> Result<(), CliError> {
-    let mut args = std::env::args().skip(1);
-    let command = args
-        .next()
-        .ok_or_else(|| AuthError::InvalidArgument(USAGE.to_owned()))?;
-    match command.as_str() {
-        ACCOUNT_COMMAND => run_account(&mut args).await,
-        LAUNCH_COMMAND => run_launch(&mut args).await,
-        other => {
-            Err(AuthError::InvalidArgument(format!("unknown command {other}\n{USAGE}")).into())
-        }
+    match Cli::parse().command {
+        Some(Command::Account(args)) => run_account(args.action).await,
+        Some(Command::Install(args)) => run_install(args).await,
+        Some(Command::Launch(args)) => run_launch(args).await,
+        Some(Command::Gui) | None => gui::run().map_err(CliError::Gui),
     }
 }
 
-async fn run_account(args: &mut impl Iterator<Item = String>) -> Result<(), CliError> {
-    let action = args
-        .next()
-        .ok_or_else(|| AuthError::InvalidArgument(USAGE.to_owned()))?;
+async fn run_account(action: AccountAction) -> Result<(), CliError> {
     let auth = Auth::new()?;
-    match action.as_str() {
-        "login" => {
+    match action {
+        AccountAction::Login => {
             let session = auth
                 .login(|prompt| {
                     println!(
@@ -63,75 +104,45 @@ async fn run_account(args: &mut impl Iterator<Item = String>) -> Result<(), CliE
                 session.profile.name, session.profile.id
             );
         }
-        "list" => print_accounts(&auth)?,
-        "offline" => {
-            let name = take_name(args)?;
+        AccountAction::List => print_accounts(&auth)?,
+        AccountAction::Offline { name } => {
             let session = auth.add_offline(&name)?;
             println!(
                 "offline account added: {} ({})",
                 session.profile.name, session.profile.id
             );
         }
-        "use" => {
-            let uuid = take_uuid(args)?;
+        AccountAction::Use { uuid } => {
             auth.set_active(&uuid)?;
             println!("active account set to {uuid}");
         }
-        "remove" => {
-            let uuid = take_uuid(args)?;
+        AccountAction::Remove { uuid } => {
             auth.remove(&uuid)?;
             println!("account removed: {uuid}");
         }
-        "current" => {
+        AccountAction::Current => {
             let session = auth.refresh_current().await?;
             println!("{}", account_line("*", &session));
-        }
-        other => {
-            return Err(AuthError::InvalidArgument(format!(
-                "unknown account command {other}\n{USAGE}"
-            ))
-            .into());
         }
     }
     Ok(())
 }
 
-async fn run_launch(args: &mut impl Iterator<Item = String>) -> Result<(), CliError> {
-    let version_id = args
-        .next()
-        .ok_or_else(|| AuthError::InvalidArgument(format!("missing version\n{USAGE}")))?;
-    let mut minecraft_dir = None;
-    let mut game_dir = None;
-    let mut java = None;
-    let mut isolated = false;
-    while let Some(option) = args.next() {
-        match option.as_str() {
-            "--minecraft-dir" => {
-                minecraft_dir = Some(PathBuf::from(take_option_value(args, &option)?))
-            }
-            "--game-dir" => game_dir = Some(PathBuf::from(take_option_value(args, &option)?)),
-            "--java" => java = Some(PathBuf::from(take_option_value(args, &option)?)),
-            "--isolate" => isolated = true,
-            other => {
-                return Err(AuthError::InvalidArgument(format!(
-                    "unknown launch option {other}\n{USAGE}"
-                ))
-                .into());
-            }
-        }
-    }
-    if isolated && game_dir.is_some() {
-        return Err(AuthError::InvalidArgument(
-            "--isolate cannot be combined with --game-dir".to_owned(),
-        )
-        .into());
-    }
-    let minecraft_dir = match minecraft_dir {
-        Some(dir) => dir,
-        None => std::env::current_dir()
-            .map_err(AuthError::from)?
-            .join(DEFAULT_MINECRAFT_DIR),
-    };
+async fn run_install(args: InstallArgs) -> Result<(), CliError> {
+    let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir)?;
+    let version_id = args.version;
+    // 核心库的下载走阻塞式 HTTP 客户端，放在阻塞线程池里执行，避免和异步运行时互相卡住
+    let install_dir = minecraft_dir.clone();
+    let install_version = version_id.clone();
+    tokio::task::spawn_blocking(move || install::install(&install_dir, &install_version))
+        .await
+        .map_err(|error| CliError::Task(error.to_string()))??;
+    println!("installed {} into {}", version_id, minecraft_dir.display());
+    Ok(())
+}
+
+async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
+    let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir)?;
 
     let auth = Auth::new()?;
     let session = auth.refresh_current().await?;
@@ -144,13 +155,13 @@ async fn run_launch(args: &mut impl Iterator<Item = String>) -> Result<(), CliEr
     };
     let mut child = launch::launch(LaunchRequest {
         minecraft_dir: &minecraft_dir,
-        version_id: &version_id,
+        version_id: &args.version,
         account,
-        java: java.as_deref(),
-        game_dir: game_dir.as_deref(),
-        isolated,
+        java: args.java.as_deref(),
+        game_dir: args.game_dir.as_deref(),
+        isolated: args.isolate,
     })?;
-    println!("launched {version_id}, pid {}", child.id());
+    println!("launched {}, pid {}", args.version, child.id());
     // 子进程继承终端输出，不等到它退出就交还 shell 会把游戏日志和提示符搅在一起
     let status = child.wait().map_err(AuthError::from)?;
     if !status.success() {
@@ -159,25 +170,11 @@ async fn run_launch(args: &mut impl Iterator<Item = String>) -> Result<(), CliEr
     Ok(())
 }
 
-fn take_option_value(
-    args: &mut impl Iterator<Item = String>,
-    option: &str,
-) -> Result<String, AuthError> {
-    args.next()
-        .ok_or_else(|| AuthError::InvalidArgument(format!("missing value for {option}")))
-}
-
-fn take_uuid(args: &mut impl Iterator<Item = String>) -> Result<String, AuthError> {
-    take_value(args, "missing account uuid")
-}
-
-fn take_name(args: &mut impl Iterator<Item = String>) -> Result<String, AuthError> {
-    take_value(args, "missing offline username")
-}
-
-fn take_value(args: &mut impl Iterator<Item = String>, missing: &str) -> Result<String, AuthError> {
-    args.next()
-        .ok_or_else(|| AuthError::InvalidArgument(missing.to_owned()))
+fn resolve_minecraft_dir(dir: Option<PathBuf>) -> Result<PathBuf, AuthError> {
+    match dir {
+        Some(dir) => Ok(dir),
+        None => Ok(std::env::current_dir()?.join(DEFAULT_MINECRAFT_DIR)),
+    }
 }
 
 fn print_accounts(auth: &Auth) -> Result<(), AuthError> {
