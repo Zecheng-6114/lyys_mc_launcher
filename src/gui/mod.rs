@@ -4,7 +4,9 @@ use std::sync::{Arc, mpsc};
 use eframe::egui;
 use tokio::runtime::Handle;
 
+use mc_launcher_core::loader::LoaderKind;
 use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
+use mc_launcher_core::utils::get_java_executable;
 
 use crate::core::auth::{AccountSession, Auth, SessionState};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
@@ -106,6 +108,7 @@ enum Message {
     TaskDone(Task),
     Progress(InstallProgress),
     Versions(Result<Vec<AvailableVersion>, String>),
+    LoaderVersions(Result<Vec<String>, String>),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -157,6 +160,16 @@ impl LoaderChoice {
             Self::NeoForge => Some(LoaderSpec::NeoForge { version }),
         }
     }
+
+    fn kind(self) -> Option<LoaderKind> {
+        match self {
+            Self::Vanilla => None,
+            Self::Fabric => Some(LoaderKind::Fabric),
+            Self::Quilt => Some(LoaderKind::Quilt),
+            Self::Forge => Some(LoaderKind::Forge),
+            Self::NeoForge => Some(LoaderKind::NeoForge),
+        }
+    }
 }
 
 pub fn run() -> Result<(), String> {
@@ -188,6 +201,11 @@ struct App {
     install_dir: String,
     install_loader: LoaderChoice,
     install_loader_version: String,
+    loader_versions: Vec<String>,
+    loader_versions_loading: bool,
+    loader_versions_error: Option<String>,
+    loader_versions_key: Option<(LoaderChoice, String)>,
+    java_path: String,
     versions: Vec<AvailableVersion>,
     versions_loading: bool,
     versions_error: Option<String>,
@@ -198,6 +216,7 @@ struct App {
     // 启动实例
     launch_version: String,
     launch_dir: String,
+    launch_java: String,
     installed: Vec<String>,
     installed_error: Option<String>,
     launching: bool,
@@ -222,6 +241,11 @@ impl App {
             install_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
             install_loader: LoaderChoice::Vanilla,
             install_loader_version: String::new(),
+            loader_versions: Vec::new(),
+            loader_versions_loading: false,
+            loader_versions_error: None,
+            loader_versions_key: None,
+            java_path: get_java_executable().unwrap_or_else(|| "java".to_owned()),
             versions: Vec::new(),
             versions_loading: false,
             versions_error: None,
@@ -231,6 +255,7 @@ impl App {
             installing: false,
             launch_version: String::new(),
             launch_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
+            launch_java: get_java_executable().unwrap_or_else(|| "java".to_owned()),
             installed: Vec::new(),
             installed_error: None,
             launching: false,
@@ -265,6 +290,24 @@ impl App {
                 .await
                 .map_err(|error| error.to_string());
             let _ = tx.send(Message::Versions(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn reload_loader_versions(&mut self, ctx: &egui::Context) {
+        let Some(kind) = self.install_loader.kind() else {
+            return;
+        };
+        self.loader_versions_loading = true;
+        self.loader_versions_error = None;
+        self.loader_versions.clear();
+        let minecraft_version = self.install_version.trim().to_owned();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.handle.spawn_blocking(move || {
+            let result = install::loader_versions(kind, &minecraft_version)
+                .map_err(|error| error.to_string());
+            let _ = tx.send(Message::LoaderVersions(result));
             ctx.request_repaint();
         });
     }
@@ -321,6 +364,11 @@ impl App {
             current: None,
         });
         let dir = PathBuf::from(self.install_dir.trim());
+        let java = if self.java_path.trim().is_empty() {
+            PathBuf::from("java")
+        } else {
+            PathBuf::from(self.java_path.trim())
+        };
         let loader_name = self.install_loader.label();
         let loader = self.install_loader.to_spec(&self.install_loader_version);
         let tx = self.tx.clone();
@@ -337,6 +385,7 @@ impl App {
                         &dir,
                         &version,
                         loader,
+                        &java,
                         &mut reporter,
                     ) {
                         Ok(result) => {
@@ -364,12 +413,17 @@ impl App {
         }
         self.launching = true;
         let dir = PathBuf::from(self.launch_dir.trim());
+        let java = if self.launch_java.trim().is_empty() {
+            PathBuf::from("java")
+        } else {
+            PathBuf::from(self.launch_java.trim())
+        };
         let isolate = self.isolate;
         let auth = Arc::clone(&self.auth);
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         self.handle.spawn(async move {
-            let result = launch_task(&auth, &dir, &version, isolate).await;
+            let result = launch_task(&auth, &dir, &version, &java, isolate).await;
             let line = match result {
                 Ok(pid) => format!("launched {version}, pid {pid}"),
                 Err(error) => format!("launch failed: {error}"),
@@ -382,9 +436,19 @@ impl App {
 
     fn install_page(&mut self, ui: &mut egui::Ui) {
         ui.heading("Install instance");
+        let loader_key = (self.install_loader, self.install_version.trim().to_owned());
+        if self.install_loader != LoaderChoice::Vanilla
+            && self.loader_versions_key.as_ref() != Some(&loader_key)
+            && !self.loader_versions_loading
+        {
+            self.loader_versions_key = Some(loader_key);
+            self.reload_loader_versions(ui.ctx());
+        }
         ui.horizontal(|ui| {
             ui.label("Version:");
-            ui.text_edit_singleline(&mut self.install_version);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.install_version).id_salt("install_version"),
+            );
             if ui
                 .add_enabled(!self.versions_loading, egui::Button::new("Refresh list"))
                 .clicked()
@@ -406,6 +470,7 @@ impl App {
         });
         if !self.versions.is_empty() {
             egui::ScrollArea::vertical()
+                .id_salt("install_mc_versions")
                 .max_height(140.0)
                 .show(ui, |ui| {
                     for version in &self.versions {
@@ -438,13 +503,66 @@ impl App {
                 ui.label("Loader version:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.install_loader_version)
+                        .id_salt("install_loader_version")
                         .hint_text("latest"),
                 );
+                if ui
+                    .add_enabled(!self.loader_versions_loading, egui::Button::new("Refresh"))
+                    .clicked()
+                {
+                    self.loader_versions_key = Some((
+                        self.install_loader,
+                        self.install_version.trim().to_owned(),
+                    ));
+                    self.reload_loader_versions(ui.ctx());
+                }
+                if self.loader_versions_loading {
+                    ui.add(egui::widgets::Spinner::new().size(14.0));
+                }
             }
         });
+        if self.install_loader != LoaderChoice::Vanilla {
+            if let Some(error) = &self.loader_versions_error {
+                ui.label(format!("loader list failed: {error}"));
+            }
+            if self.loader_versions.is_empty() {
+                if !self.loader_versions_loading && self.loader_versions_error.is_none() {
+                    ui.label("no compatible loader version found");
+                }
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt("install_loader_versions")
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        for version in &self.loader_versions {
+                            if ui
+                                .selectable_label(
+                                    self.install_loader_version == version.as_str(),
+                                    version.as_str(),
+                                )
+                                .clicked()
+                            {
+                                self.install_loader_version = version.clone();
+                            }
+                        }
+                    });
+            }
+            if matches!(
+                self.install_loader,
+                LoaderChoice::Forge | LoaderChoice::NeoForge
+            ) {
+                ui.horizontal(|ui| {
+                    ui.label("Java:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.java_path).id_salt("install_java"),
+                    );
+                    ui.label("used by the loader installer");
+                });
+            }
+        }
         ui.horizontal(|ui| {
             ui.label("Minecraft dir:");
-            ui.text_edit_singleline(&mut self.install_dir);
+            ui.add(egui::TextEdit::singleline(&mut self.install_dir).id_salt("install_dir"));
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -474,10 +592,14 @@ impl App {
         ui.heading("Launch instance");
         ui.horizontal(|ui| {
             ui.label("Minecraft dir:");
-            ui.text_edit_singleline(&mut self.launch_dir);
+            ui.add(egui::TextEdit::singleline(&mut self.launch_dir).id_salt("launch_dir"));
             if ui.button("Scan installed").clicked() {
                 self.scan_installed();
             }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Java:");
+            ui.add(egui::TextEdit::singleline(&mut self.launch_java).id_salt("launch_java"));
         });
         if let Some(error) = &self.installed_error {
             ui.label(format!("scan failed: {error}"));
@@ -487,11 +609,16 @@ impl App {
         } else {
             ui.label("Installed instances:");
             egui::ScrollArea::vertical()
+                .id_salt("launch_instances")
                 .max_height(160.0)
                 .show(ui, |ui| {
                     for id in &self.installed {
+                        let label = match loader_tag(id) {
+                            Some(tag) => format!("{id}  · {tag}"),
+                            None => id.clone(),
+                        };
                         if ui
-                            .selectable_label(self.launch_version == id.as_str(), id.as_str())
+                            .selectable_label(self.launch_version == id.as_str(), label)
                             .clicked()
                         {
                             self.launch_version = id.clone();
@@ -522,6 +649,7 @@ async fn launch_task(
     auth: &Auth,
     minecraft_dir: &Path,
     version: &str,
+    java: &Path,
     isolate: bool,
 ) -> Result<u32, String> {
     let session = auth
@@ -533,6 +661,7 @@ async fn launch_task(
             minecraft_dir,
             version,
             LaunchAccount::Offline(&session.profile),
+            java,
             isolate,
         )
     } else {
@@ -544,6 +673,7 @@ async fn launch_task(
             minecraft_dir,
             version,
             LaunchAccount::Microsoft(&token),
+            java,
             isolate,
         )
     }
@@ -553,18 +683,33 @@ fn spawn_game(
     minecraft_dir: &Path,
     version: &str,
     account: LaunchAccount<'_>,
+    java: &Path,
     isolate: bool,
 ) -> Result<u32, String> {
     let child = launch::launch(LaunchRequest {
         minecraft_dir,
         version_id: version,
         account,
-        java: None,
+        java: Some(java),
         game_dir: None,
         isolated: isolate,
     })
     .map_err(|error| error.to_string())?;
     Ok(child.id())
+}
+
+fn loader_tag(version_id: &str) -> Option<&'static str> {
+    if version_id.starts_with("fabric-loader-") {
+        Some("Fabric")
+    } else if version_id.starts_with("quilt-loader-") {
+        Some("Quilt")
+    } else if version_id.starts_with("neoforge-") {
+        Some("NeoForge")
+    } else if version_id.contains("-forge-") {
+        Some("Forge")
+    } else {
+        None
+    }
 }
 
 impl eframe::App for App {
@@ -600,6 +745,16 @@ impl eframe::App for App {
                             }
                         }
                         Err(error) => self.versions_error = Some(error),
+                    }
+                }
+                Message::LoaderVersions(result) => {
+                    self.loader_versions_loading = false;
+                    match result {
+                        Ok(versions) => {
+                            self.loader_versions = versions;
+                            self.loader_versions_error = None;
+                        }
+                        Err(error) => self.loader_versions_error = Some(error),
                     }
                 }
             }

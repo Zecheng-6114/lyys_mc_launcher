@@ -14,6 +14,8 @@ const LAUNCHER_NAME: &str = "LYYSML";
 pub enum LaunchError {
     #[error(transparent)]
     Core(#[from] mc_launcher_core::LauncherError),
+    #[error("cannot resolve a launch path: {0}")]
+    Absolute(#[source] std::io::Error),
     #[error("cannot start the game process: {0}")]
     Spawn(#[source] std::io::Error),
 }
@@ -33,12 +35,16 @@ pub struct LaunchRequest<'a> {
 }
 
 pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
-    let launcher = Launcher::new(request.minecraft_dir);
+    // 类路径和 natives 路径都基于 Minecraft 目录；如果目录是相对路径，
+    // 而工作目录又被切换到游戏目录，Java 会按新工作目录解析这些相对路径导致找不到主类。
+    let minecraft_dir =
+        std::path::absolute(request.minecraft_dir).map_err(LaunchError::Absolute)?;
+    let launcher = Launcher::new(&minecraft_dir);
     let version = launcher.load_version(request.version_id)?;
     let options = LaunchOptions {
         account: core_account(&request.account),
         java_executable: request.java.map(Path::to_path_buf),
-        game_directory: Some(game_directory(&request)),
+        game_directory: Some(game_directory(&minecraft_dir, &request)?),
         launcher_name: LAUNCHER_NAME.to_owned(),
         launcher_version: env!("CARGO_PKG_VERSION").to_owned(),
         ..Default::default()
@@ -52,18 +58,20 @@ pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
         .map_err(LaunchError::Spawn)
 }
 
-fn game_directory(request: &LaunchRequest<'_>) -> PathBuf {
+fn game_directory(
+    minecraft_dir: &Path,
+    request: &LaunchRequest<'_>,
+) -> Result<PathBuf, LaunchError> {
     if let Some(dir) = request.game_dir {
-        return dir.to_path_buf();
+        return std::path::absolute(dir).map_err(LaunchError::Absolute);
     }
     if request.isolated {
-        return request
-            .minecraft_dir
+        return Ok(minecraft_dir
             .join("versions")
-            .join(request.version_id);
+            .join(request.version_id));
     }
     // 原版启动器把游戏目录固定在 .minecraft 根目录，存档与资源跨版本共享
-    request.minecraft_dir.to_path_buf()
+    Ok(minecraft_dir.to_path_buf())
 }
 
 fn core_account(account: &LaunchAccount<'_>) -> Account {

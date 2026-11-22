@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
+use mc_launcher_core::utils::get_java_executable;
 use thiserror::Error;
 
 use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
@@ -22,6 +24,8 @@ pub enum CliError {
     Game(std::process::ExitStatus),
     #[error("install task failed: {0}")]
     Task(String),
+    #[error("unknown loader {0}, expected fabric, quilt, forge or neoforge")]
+    UnknownLoader(String),
     #[error("gui failed: {0}")]
     Gui(String),
 }
@@ -62,6 +66,15 @@ struct InstallArgs {
     version: String,
     #[arg(long)]
     minecraft_dir: Option<PathBuf>,
+    /// Mod loader to install: fabric, quilt, forge or neoforge.
+    #[arg(long)]
+    loader: Option<String>,
+    /// Exact loader version; defaults to the latest compatible one.
+    #[arg(long, requires = "loader")]
+    loader_version: Option<String>,
+    /// Java executable used by the Forge/NeoForge installer (defaults to the detected Java).
+    #[arg(long)]
+    java: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -131,14 +144,60 @@ async fn run_account(action: AccountAction) -> Result<(), CliError> {
 async fn run_install(args: InstallArgs) -> Result<(), CliError> {
     let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir)?;
     let version_id = args.version;
+    let java = args
+        .java
+        .or_else(|| get_java_executable().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("java"));
+    let loader = match args.loader {
+        Some(name) => Some(parse_loader(&name, args.loader_version)?),
+        None => None,
+    };
     // 核心库的下载走阻塞式 HTTP 客户端，放在阻塞线程池里执行，避免和异步运行时互相卡住
     let install_dir = minecraft_dir.clone();
     let install_version = version_id.clone();
-    tokio::task::spawn_blocking(move || install::install(&install_dir, &install_version))
-        .await
-        .map_err(|error| CliError::Task(error.to_string()))??;
+    tokio::task::spawn_blocking(move || match loader {
+        Some(loader) => {
+            let mut printed = false;
+            let mut reporter = |progress: install::InstallProgress| {
+                printed = true;
+                print!(
+                    "\rdownloaded {} files, skipped {}",
+                    progress.downloaded, progress.skipped
+                );
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            };
+            let result = install::install_loader_with_reporter(
+                &install_dir,
+                &install_version,
+                loader,
+                &java,
+                &mut reporter,
+            );
+            if printed {
+                println!();
+            }
+            result
+        }
+        None => install::install(&install_dir, &install_version),
+    })
+    .await
+    .map_err(|error| CliError::Task(error.to_string()))??;
     println!("installed {} into {}", version_id, minecraft_dir.display());
     Ok(())
+}
+
+fn parse_loader(name: &str, version: Option<String>) -> Result<LoaderSpec, CliError> {
+    let version = match version {
+        Some(version) if !version.trim().is_empty() => LoaderVersion::Exact(version),
+        _ => LoaderVersion::Latest,
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "fabric" => Ok(LoaderSpec::Fabric { version }),
+        "quilt" => Ok(LoaderSpec::Quilt { version }),
+        "forge" => Ok(LoaderSpec::Forge { version }),
+        "neoforge" => Ok(LoaderSpec::NeoForge { version }),
+        other => Err(CliError::UnknownLoader(other.to_owned())),
+    }
 }
 
 async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
