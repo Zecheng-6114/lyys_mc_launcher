@@ -5,6 +5,7 @@ use std::time::Duration;
 use mc_launcher_core::install::client::version_json_path;
 use mc_launcher_core::install::{InstallRequest, InstallResult};
 use mc_launcher_core::launcher::Launcher;
+use mc_launcher_core::loader::common::LoaderSpec;
 use mc_launcher_core::progress::ProgressEvent;
 use serde::Deserialize;
 
@@ -92,7 +93,7 @@ pub fn install(
     let mut downloaded = 0_u64;
     let mut skipped = 0_u64;
     let mut shown = false;
-    let result = run_install(minecraft_dir, version_id, |event: ProgressEvent| {
+    let result = run_install(minecraft_dir, version_id, None, |event: ProgressEvent| {
         match event {
             ProgressEvent::TaskFinished { .. } => downloaded += 1,
             ProgressEvent::TaskSkipped { .. } => skipped += 1,
@@ -114,10 +115,29 @@ pub fn install_with_reporter(
     version_id: &str,
     reporter: &mut dyn FnMut(InstallProgress),
 ) -> Result<InstallResult, mc_launcher_core::LauncherError> {
+    install_reporting(minecraft_dir, version_id, None, reporter)
+}
+
+/// 与 [`install_with_reporter`] 相同，但可以同时安装指定的模组加载器。
+pub fn install_loader_with_reporter(
+    minecraft_dir: &Path,
+    version_id: &str,
+    loader: LoaderSpec,
+    reporter: &mut dyn FnMut(InstallProgress),
+) -> Result<InstallResult, mc_launcher_core::LauncherError> {
+    install_reporting(minecraft_dir, version_id, Some(loader), reporter)
+}
+
+fn install_reporting(
+    minecraft_dir: &Path,
+    version_id: &str,
+    loader: Option<LoaderSpec>,
+    reporter: &mut dyn FnMut(InstallProgress),
+) -> Result<InstallResult, mc_launcher_core::LauncherError> {
     let mut downloaded = 0_u64;
     let mut skipped = 0_u64;
     let mut current: Option<String> = None;
-    run_install(minecraft_dir, version_id, |event: ProgressEvent| {
+    run_install(minecraft_dir, version_id, loader, |event: ProgressEvent| {
         match event {
             ProgressEvent::TaskStarted { label, .. } => current = Some(label),
             ProgressEvent::TaskFinished { .. } => {
@@ -138,11 +158,20 @@ pub fn install_with_reporter(
 fn run_install<F>(
     minecraft_dir: &Path,
     version_id: &str,
+    loader: Option<LoaderSpec>,
     mut on_event: F,
 ) -> Result<InstallResult, mc_launcher_core::LauncherError>
 where
     F: FnMut(ProgressEvent),
 {
     let launcher = Launcher::new(minecraft_dir);
-    launcher.install_with_progress(InstallRequest::vanilla(version_id), &mut on_event)
+    let request = match loader {
+        Some(loader) => InstallRequest {
+            minecraft_version: version_id.to_owned(),
+            loader: Some(loader),
+            java: mc_launcher_core::install::JavaInstallPolicy::Auto,
+        },
+        None => InstallRequest::vanilla(version_id),
+    };
+    launcher.install_with_progress(request, &mut on_event)
 }

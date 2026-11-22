@@ -4,6 +4,8 @@ use std::sync::{Arc, mpsc};
 use eframe::egui;
 use tokio::runtime::Handle;
 
+use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
+
 use crate::core::auth::{AccountSession, Auth, SessionState};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
 use crate::core::launch::{self, LaunchAccount, LaunchRequest};
@@ -112,6 +114,51 @@ enum Page {
     Launch,
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum LoaderChoice {
+    Vanilla,
+    Fabric,
+    Quilt,
+    Forge,
+    NeoForge,
+}
+
+impl LoaderChoice {
+    const ALL: [Self; 5] = [
+        Self::Vanilla,
+        Self::Fabric,
+        Self::Quilt,
+        Self::Forge,
+        Self::NeoForge,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Vanilla => "Vanilla",
+            Self::Fabric => "Fabric",
+            Self::Quilt => "Quilt",
+            Self::Forge => "Forge",
+            Self::NeoForge => "NeoForge",
+        }
+    }
+
+    fn to_spec(self, version: &str) -> Option<LoaderSpec> {
+        let version = version.trim();
+        let version = if version.is_empty() {
+            LoaderVersion::Latest
+        } else {
+            LoaderVersion::Exact(version.to_owned())
+        };
+        match self {
+            Self::Vanilla => None,
+            Self::Fabric => Some(LoaderSpec::Fabric { version }),
+            Self::Quilt => Some(LoaderSpec::Quilt { version }),
+            Self::Forge => Some(LoaderSpec::Forge { version }),
+            Self::NeoForge => Some(LoaderSpec::NeoForge { version }),
+        }
+    }
+}
+
 pub fn run() -> Result<(), String> {
     let auth = Auth::new().map_err(|error| error.to_string())?;
     let handle = Handle::current();
@@ -139,6 +186,8 @@ struct App {
     // 安装实例
     install_version: String,
     install_dir: String,
+    install_loader: LoaderChoice,
+    install_loader_version: String,
     versions: Vec<AvailableVersion>,
     versions_loading: bool,
     versions_error: Option<String>,
@@ -171,6 +220,8 @@ impl App {
             page: Page::Install,
             install_version: String::new(),
             install_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
+            install_loader: LoaderChoice::Vanilla,
+            install_loader_version: String::new(),
             versions: Vec::new(),
             versions_loading: false,
             versions_error: None,
@@ -270,6 +321,8 @@ impl App {
             current: None,
         });
         let dir = PathBuf::from(self.install_dir.trim());
+        let loader_name = self.install_loader.label();
+        let loader = self.install_loader.to_spec(&self.install_loader_version);
         let tx = self.tx.clone();
         let progress_tx = tx.clone();
         let ctx = ctx.clone();
@@ -278,9 +331,24 @@ impl App {
                 let _ = progress_tx.send(Message::Progress(progress));
                 ctx.request_repaint();
             };
-            let line = match install::install_with_reporter(&dir, &version, &mut reporter) {
-                Ok(_) => format!("installed {version}"),
-                Err(error) => format!("install failed: {error}"),
+            let line = match loader {
+                Some(loader) => {
+                    match install::install_loader_with_reporter(
+                        &dir,
+                        &version,
+                        loader,
+                        &mut reporter,
+                    ) {
+                        Ok(result) => {
+                            format!("installed {loader_name} {}", result.version_id)
+                        }
+                        Err(error) => format!("install failed: {error}"),
+                    }
+                }
+                None => match install::install_with_reporter(&dir, &version, &mut reporter) {
+                    Ok(_) => format!("installed {version}"),
+                    Err(error) => format!("install failed: {error}"),
+                },
             };
             let _ = tx.send(Message::Log(line));
             let _ = tx.send(Message::TaskDone(Task::Install));
@@ -357,6 +425,23 @@ impl App {
                     }
                 });
         }
+        ui.horizontal(|ui| {
+            ui.label("Loader:");
+            egui::ComboBox::from_id_salt("install_loader")
+                .selected_text(self.install_loader.label())
+                .show_ui(ui, |ui| {
+                    for choice in LoaderChoice::ALL {
+                        ui.selectable_value(&mut self.install_loader, choice, choice.label());
+                    }
+                });
+            if self.install_loader != LoaderChoice::Vanilla {
+                ui.label("Loader version:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.install_loader_version)
+                        .hint_text("latest"),
+                );
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("Minecraft dir:");
             ui.text_edit_singleline(&mut self.install_dir);
