@@ -92,11 +92,24 @@ fn paint_contour_background(painter: &egui::Painter, rect: egui::Rect, visuals: 
     painter.extend(shapes);
 }
 
+#[derive(Clone, Copy)]
+enum Task {
+    Login,
+    Install,
+    Launch,
+}
+
 enum Message {
     Log(String),
-    TaskDone,
+    TaskDone(Task),
     Progress(InstallProgress),
     Versions(Result<Vec<AvailableVersion>, String>),
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Page {
+    Install,
+    Launch,
 }
 
 pub fn run() -> Result<(), String> {
@@ -122,17 +135,26 @@ struct App {
     accounts: Vec<AccountSession>,
     active: Option<String>,
     offline_name: String,
-    version: String,
+    page: Page,
+    // 安装实例
+    install_version: String,
+    install_dir: String,
     versions: Vec<AvailableVersion>,
     versions_loading: bool,
     versions_error: Option<String>,
     versions_requested: bool,
     show_all_versions: bool,
-    minecraft_dir: String,
+    install_progress: Option<InstallProgress>,
+    installing: bool,
+    // 启动实例
+    launch_version: String,
+    launch_dir: String,
+    installed: Vec<String>,
+    installed_error: Option<String>,
+    launching: bool,
     isolate: bool,
-    progress: Option<InstallProgress>,
+    logging_in: bool,
     log: Vec<String>,
-    busy: bool,
 }
 
 impl App {
@@ -146,19 +168,27 @@ impl App {
             accounts: Vec::new(),
             active: None,
             offline_name: String::new(),
-            version: String::new(),
+            page: Page::Install,
+            install_version: String::new(),
+            install_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
             versions: Vec::new(),
             versions_loading: false,
             versions_error: None,
             versions_requested: false,
             show_all_versions: false,
-            minecraft_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
+            install_progress: None,
+            installing: false,
+            launch_version: String::new(),
+            launch_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
+            installed: Vec::new(),
+            installed_error: None,
+            launching: false,
             isolate: false,
-            progress: None,
+            logging_in: false,
             log: Vec::new(),
-            busy: false,
         };
         app.reload_accounts();
+        app.scan_installed();
         app
     }
 
@@ -188,12 +218,22 @@ impl App {
         });
     }
 
-    fn game_dir(&self) -> PathBuf {
-        PathBuf::from(self.minecraft_dir.trim())
+    fn scan_installed(&mut self) {
+        let dir = PathBuf::from(self.launch_dir.trim());
+        match install::installed_versions(&dir) {
+            Ok(versions) => {
+                self.installed_error = None;
+                if !versions.iter().any(|id| id == &self.launch_version) {
+                    self.launch_version = versions.first().cloned().unwrap_or_default();
+                }
+                self.installed = versions;
+            }
+            Err(error) => self.installed_error = Some(error.to_string()),
+        }
     }
 
     fn start_login(&mut self, ctx: &egui::Context) {
-        self.busy = true;
+        self.logging_in = true;
         let auth = Arc::clone(&self.auth);
         let tx = self.tx.clone();
         let prompt_tx = tx.clone();
@@ -212,24 +252,24 @@ impl App {
                 Err(error) => format!("login failed: {error}"),
             };
             let _ = tx.send(Message::Log(line));
-            let _ = tx.send(Message::TaskDone);
+            let _ = tx.send(Message::TaskDone(Task::Login));
             ctx.request_repaint();
         });
     }
 
     fn start_install(&mut self, ctx: &egui::Context) {
-        let version = self.version.trim().to_owned();
+        let version = self.install_version.trim().to_owned();
         if version.is_empty() {
             self.log.push("enter a version first".to_owned());
             return;
         }
-        self.busy = true;
-        self.progress = Some(InstallProgress {
+        self.installing = true;
+        self.install_progress = Some(InstallProgress {
             downloaded: 0,
             skipped: 0,
             current: None,
         });
-        let dir = self.game_dir();
+        let dir = PathBuf::from(self.install_dir.trim());
         let tx = self.tx.clone();
         let progress_tx = tx.clone();
         let ctx = ctx.clone();
@@ -243,20 +283,19 @@ impl App {
                 Err(error) => format!("install failed: {error}"),
             };
             let _ = tx.send(Message::Log(line));
-            let _ = tx.send(Message::TaskDone);
+            let _ = tx.send(Message::TaskDone(Task::Install));
             ctx.request_repaint();
         });
     }
 
     fn start_launch(&mut self, ctx: &egui::Context) {
-        let version = self.version.trim().to_owned();
+        let version = self.launch_version.trim().to_owned();
         if version.is_empty() {
-            self.log.push("enter a version first".to_owned());
+            self.log.push("select an installed instance first".to_owned());
             return;
         }
-        self.busy = true;
-        self.progress = None;
-        let dir = self.game_dir();
+        self.launching = true;
+        let dir = PathBuf::from(self.launch_dir.trim());
         let isolate = self.isolate;
         let auth = Arc::clone(&self.auth);
         let tx = self.tx.clone();
@@ -268,8 +307,128 @@ impl App {
                 Err(error) => format!("launch failed: {error}"),
             };
             let _ = tx.send(Message::Log(line));
-            let _ = tx.send(Message::TaskDone);
+            let _ = tx.send(Message::TaskDone(Task::Launch));
             ctx.request_repaint();
+        });
+    }
+
+    fn install_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Install instance");
+        ui.horizontal(|ui| {
+            ui.label("Version:");
+            ui.text_edit_singleline(&mut self.install_version);
+            if ui
+                .add_enabled(!self.versions_loading, egui::Button::new("Refresh list"))
+                .clicked()
+            {
+                self.reload_versions(ui.ctx());
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.show_all_versions,
+                "Show snapshots and old versions",
+            );
+            if self.versions_loading {
+                ui.add(egui::widgets::Spinner::new().size(14.0));
+                ui.label("loading versions...");
+            } else if let Some(error) = &self.versions_error {
+                ui.label(format!("version list failed: {error}"));
+            }
+        });
+        if !self.versions.is_empty() {
+            egui::ScrollArea::vertical()
+                .max_height(140.0)
+                .show(ui, |ui| {
+                    for version in &self.versions {
+                        if !self.show_all_versions && version.kind != "release" {
+                            continue;
+                        }
+                        let selected = self.install_version == version.id;
+                        if ui
+                            .selectable_label(
+                                selected,
+                                format!("{}  ({})", version.id, version.kind),
+                            )
+                            .clicked()
+                        {
+                            self.install_version = version.id.clone();
+                        }
+                    }
+                });
+        }
+        ui.horizontal(|ui| {
+            ui.label("Minecraft dir:");
+            ui.text_edit_singleline(&mut self.install_dir);
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.installing, egui::Button::new("Install"))
+                .clicked()
+            {
+                self.start_install(ui.ctx());
+            }
+            if self.installing {
+                ui.add(egui::widgets::Spinner::new().size(14.0));
+            }
+        });
+        if let Some(progress) = &self.install_progress {
+            ui.add_space(6.0);
+            ui.monospace(format!(
+                "files downloaded: {} · skipped: {}",
+                progress.downloaded, progress.skipped
+            ));
+            if let Some(current) = &progress.current {
+                ui.monospace(format!("current: {current}"));
+            }
+        }
+    }
+
+    fn launch_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Launch instance");
+        ui.horizontal(|ui| {
+            ui.label("Minecraft dir:");
+            ui.text_edit_singleline(&mut self.launch_dir);
+            if ui.button("Scan installed").clicked() {
+                self.scan_installed();
+            }
+        });
+        if let Some(error) = &self.installed_error {
+            ui.label(format!("scan failed: {error}"));
+        }
+        if self.installed.is_empty() {
+            ui.label("no installed instance found, install one first");
+        } else {
+            ui.label("Installed instances:");
+            egui::ScrollArea::vertical()
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for id in &self.installed {
+                        if ui
+                            .selectable_label(self.launch_version == id.as_str(), id.as_str())
+                            .clicked()
+                        {
+                            self.launch_version = id.clone();
+                        }
+                    }
+                });
+        }
+        ui.checkbox(&mut self.isolate, "Isolated game dir (versions/<version>)");
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !self.launching && !self.launch_version.trim().is_empty(),
+                    egui::Button::new("Launch"),
+                )
+                .clicked()
+            {
+                self.start_launch(ui.ctx());
+            }
+            if self.launching {
+                ui.add(egui::widgets::Spinner::new().size(14.0));
+            }
         });
     }
 }
@@ -329,22 +488,29 @@ impl eframe::App for App {
         while let Ok(message) = self.rx.try_recv() {
             match message {
                 Message::Log(line) => self.log.push(line),
-                Message::TaskDone => {
-                    self.busy = false;
-                    self.reload_accounts();
-                }
-                Message::Progress(progress) => self.progress = Some(progress),
+                Message::TaskDone(task) => match task {
+                    Task::Login => {
+                        self.logging_in = false;
+                        self.reload_accounts();
+                    }
+                    Task::Install => {
+                        self.installing = false;
+                        self.scan_installed();
+                    }
+                    Task::Launch => self.launching = false,
+                },
+                Message::Progress(progress) => self.install_progress = Some(progress),
                 Message::Versions(result) => {
                     self.versions_loading = false;
                     match result {
                         Ok(versions) => {
                             self.versions = versions;
                             self.versions_error = None;
-                            if self.version.trim().is_empty() {
+                            if self.install_version.trim().is_empty() {
                                 if let Some(latest) =
                                     self.versions.iter().find(|entry| entry.kind == "release")
                                 {
-                                    self.version = latest.id.clone();
+                                    self.install_version = latest.id.clone();
                                 }
                             }
                         }
@@ -392,7 +558,7 @@ impl eframe::App for App {
                 ui.label("Offline name:");
                 ui.text_edit_singleline(&mut self.offline_name);
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Add offline"))
+                    .add_enabled(!self.logging_in, egui::Button::new("Add offline"))
                     .clicked()
                 {
                     let name = self.offline_name.trim().to_owned();
@@ -405,7 +571,7 @@ impl eframe::App for App {
                     }
                 }
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Login with Microsoft"))
+                    .add_enabled(!self.logging_in, egui::Button::new("Login with Microsoft"))
                     .clicked()
                 {
                     self.start_login(&ctx);
@@ -429,84 +595,14 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ui, |ui| {
             paint_contour_background(ui.painter(), ui.max_rect(), ui.visuals());
-            ui.heading("Game");
             ui.horizontal(|ui| {
-                ui.label("Version:");
-                ui.text_edit_singleline(&mut self.version);
-                if ui
-                    .add_enabled(!self.versions_loading, egui::Button::new("Refresh list"))
-                    .clicked()
-                {
-                    self.reload_versions(&ctx);
-                }
+                ui.selectable_value(&mut self.page, Page::Install, "Install instance");
+                ui.selectable_value(&mut self.page, Page::Launch, "Launch instance");
             });
-            ui.horizontal(|ui| {
-                ui.checkbox(
-                    &mut self.show_all_versions,
-                    "Show snapshots and old versions",
-                );
-                if self.versions_loading {
-                    ui.add(egui::widgets::Spinner::new().size(14.0));
-                    ui.label("loading versions...");
-                } else if let Some(error) = &self.versions_error {
-                    ui.label(format!("version list failed: {error}"));
-                }
-            });
-            if !self.versions.is_empty() {
-                egui::ScrollArea::vertical()
-                    .max_height(140.0)
-                    .show(ui, |ui| {
-                        for version in &self.versions {
-                            if !self.show_all_versions && version.kind != "release" {
-                                continue;
-                            }
-                            let selected = self.version == version.id;
-                            if ui
-                                .selectable_label(
-                                    selected,
-                                    format!("{}  ({})", version.id, version.kind),
-                                )
-                                .clicked()
-                            {
-                                self.version = version.id.clone();
-                            }
-                        }
-                    });
-            }
-            ui.horizontal(|ui| {
-                ui.label("Minecraft dir:");
-                ui.text_edit_singleline(&mut self.minecraft_dir);
-            });
-            ui.checkbox(&mut self.isolate, "Isolated game dir (versions/<version>)");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Install"))
-                    .clicked()
-                {
-                    self.start_install(&ctx);
-                }
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Launch"))
-                    .clicked()
-                {
-                    self.start_launch(&ctx);
-                }
-            });
-            if let Some(progress) = &self.progress {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if self.busy {
-                        ui.add(egui::widgets::Spinner::new().size(14.0));
-                    }
-                    ui.monospace(format!(
-                        "files downloaded: {} · skipped: {}",
-                        progress.downloaded, progress.skipped
-                    ));
-                });
-                if let Some(current) = &progress.current {
-                    ui.monospace(format!("current: {current}"));
-                }
+            ui.separator();
+            match self.page {
+                Page::Install => self.install_page(ui),
+                Page::Launch => self.launch_page(ui),
             }
         });
     }

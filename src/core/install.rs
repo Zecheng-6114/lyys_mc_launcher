@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+use mc_launcher_core::install::client::version_json_path;
 use mc_launcher_core::install::{InstallRequest, InstallResult};
 use mc_launcher_core::launcher::Launcher;
 use mc_launcher_core::progress::ProgressEvent;
@@ -50,6 +51,30 @@ pub async fn available_versions() -> Result<Vec<AvailableVersion>, reqwest::Erro
             kind: entry.kind,
         })
         .collect())
+}
+
+/// 列出本地 `versions` 目录下已安装的实例（存在同名版本 JSON 才算）。
+pub fn installed_versions(minecraft_dir: &Path) -> std::io::Result<Vec<String>> {
+    let versions_dir = minecraft_dir.join("versions");
+    if !versions_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut versions = Vec::new();
+    for entry in std::fs::read_dir(versions_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if version_json_path(minecraft_dir, name).is_file() {
+            versions.push(name.to_owned());
+        }
+    }
+    versions.sort();
+    Ok(versions)
 }
 
 /// 安装过程中给调用方的精简进度。
