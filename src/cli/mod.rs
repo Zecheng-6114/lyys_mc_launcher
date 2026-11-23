@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
 use crate::core::install;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
+use crate::core::modrinth::{self, ModrinthError, ModSearchRequest};
 use crate::gui;
 
 const DEFAULT_MINECRAFT_DIR: &str = ".minecraft";
@@ -18,6 +19,8 @@ pub enum CliError {
     Auth(#[from] AuthError),
     #[error(transparent)]
     Launch(#[from] LaunchError),
+    #[error(transparent)]
+    Modrinth(#[from] ModrinthError),
     #[error(transparent)]
     Core(#[from] mc_launcher_core::LauncherError),
     #[error("the game exited with {0}")]
@@ -42,6 +45,7 @@ enum Command {
     Account(AccountArgs),
     Install(InstallArgs),
     Launch(LaunchArgs),
+    Search(SearchArgs),
     Gui,
 }
 
@@ -90,11 +94,25 @@ struct LaunchArgs {
     isolate: bool,
 }
 
+#[derive(Args)]
+struct SearchArgs {
+    /// Search query; leave empty to list popular mods.
+    #[arg(long)]
+    query: Option<String>,
+    /// Only show mods for this Minecraft version.
+    #[arg(long)]
+    minecraft: Option<String>,
+    /// Only show mods for this loader: fabric, quilt, forge or neoforge.
+    #[arg(long)]
+    loader: Option<String>,
+}
+
 pub async fn run() -> Result<(), CliError> {
     match Cli::parse().command {
         Some(Command::Account(args)) => run_account(args.action).await,
         Some(Command::Install(args)) => run_install(args).await,
         Some(Command::Launch(args)) => run_launch(args).await,
+        Some(Command::Search(args)) => run_search(args).await,
         Some(Command::Gui) | None => gui::run().map_err(CliError::Gui),
     }
 }
@@ -226,6 +244,27 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
     if !status.success() {
         return Err(CliError::Game(status));
     }
+    Ok(())
+}
+
+async fn run_search(args: SearchArgs) -> Result<(), CliError> {
+    let result = modrinth::search(ModSearchRequest {
+        query: args.query.as_deref().unwrap_or(""),
+        game_version: args.minecraft.as_deref(),
+        loader: args.loader.as_deref(),
+        offset: 0,
+    })
+    .await?;
+    if result.hits.is_empty() {
+        println!("no mods found");
+        return Ok(());
+    }
+    for hit in &result.hits {
+        println!("{}  ·  {} downloads", hit.title, hit.downloads);
+        println!("  https://modrinth.com/mod/{}", hit.slug);
+    }
+    println!();
+    println!("{} results, showing {}", result.total_hits, result.hits.len());
     Ok(())
 }
 

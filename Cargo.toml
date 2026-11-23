@@ -6,9 +6,12 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.6.9", features = ["derive"] }
 eframe = "0.37.0"
+egui_extras = { version = "0.37.0", features = ["image", "http"] }
+# egui_extras 的图片加载器不启用解码格式，这里通过 feature 合并打开 PNG/JPEG/WebP
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 mc-launcher-core = "0.1.2"
 md-5 = "0.11.0"
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "form", "rustls"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "form", "query", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"

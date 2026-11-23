@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
 use mc_launcher_core::loader::LoaderKind;
@@ -11,8 +13,13 @@ use mc_launcher_core::utils::get_java_executable;
 use crate::core::auth::{AccountSession, Auth, SessionState};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
 use crate::core::launch::{self, LaunchAccount, LaunchRequest};
+use crate::core::modrinth::{
+    self, InstallOutcome, ModSearchHit, ModSearchRequest, ModSearchResult,
+};
 
 const DEFAULT_MINECRAFT_DIR: &str = ".minecraft";
+/// Records which jar each installed mod slug maps to, so the UI can tell that a mod is installed.
+const MOD_MANIFEST_FILE: &str = ".lyys_mods.json";
 
 const CONTOUR_SEGMENTS: usize = 96;
 
@@ -109,12 +116,27 @@ enum Message {
     Progress(InstallProgress),
     Versions(Result<Vec<AvailableVersion>, String>),
     LoaderVersions(Result<Vec<String>, String>),
+    ModSearch {
+        page: u32,
+        result: Result<ModSearchResult, String>,
+    },
+    ModInstalled {
+        dir: PathBuf,
+        game_version: String,
+        loader: String,
+        result: Result<InstallOutcome, String>,
+    },
+    ModUpdates {
+        dir: PathBuf,
+        updates: HashMap<String, (String, String)>,
+    },
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Page {
     Install,
     Launch,
+    Mods,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -182,9 +204,47 @@ pub fn run() -> Result<(), String> {
     eframe::run_native(
         "LYYS Minecraft Launcher",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(auth, handle)))),
+        Box::new(move |cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(App::new(auth, handle)))
+        }),
     )
     .map_err(|error| error.to_string())
+}
+
+#[derive(Clone)]
+struct InstalledInstance {
+    id: String,
+    loader: Option<&'static str>,
+    game_version: Option<String>,
+}
+
+/// What the manifest remembers about one installed mod.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ModRecord {
+    filename: String,
+    #[serde(default)]
+    version_id: String,
+    #[serde(default)]
+    version_number: String,
+    #[serde(default)]
+    game_version: String,
+    #[serde(default)]
+    loader: String,
+    /// True when the jar was pulled in as a required dependency.
+    #[serde(default)]
+    auto: bool,
+    /// Project ids of the required dependencies.
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModAction {
+    Install,
+    Reinstall,
+    Uninstall,
+    Update,
 }
 
 struct App {
@@ -198,7 +258,7 @@ struct App {
     page: Page,
     // 安装实例
     install_version: String,
-    install_dir: String,
+    minecraft_dir: String,
     install_loader: LoaderChoice,
     install_loader_version: String,
     loader_versions: Vec<String>,
@@ -215,12 +275,28 @@ struct App {
     installing: bool,
     // 启动实例
     launch_version: String,
-    launch_dir: String,
     launch_java: String,
-    installed: Vec<String>,
+    installed: Vec<InstalledInstance>,
+    installed_dir: String,
     installed_error: Option<String>,
     launching: bool,
     isolate: bool,
+    // 搜索模组
+    mod_query: String,
+    mod_minecraft_version: String,
+    mod_loader: Option<LoaderKind>,
+    mod_instance_id: Option<String>,
+    mod_results: Vec<ModSearchHit>,
+    mod_total: u64,
+    /// 当前页码，从 1 开始。
+    mod_page: u32,
+    mod_searching: bool,
+    mod_installing: Option<String>,
+    mod_notice: Option<String>,
+    mod_error: Option<String>,
+    installed_mods: HashMap<String, ModRecord>,
+    installed_mods_dir: String,
+    mod_updates: HashMap<String, (String, String)>,
     logging_in: bool,
     log: Vec<String>,
 }
@@ -238,7 +314,7 @@ impl App {
             offline_name: String::new(),
             page: Page::Install,
             install_version: String::new(),
-            install_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
+            minecraft_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
             install_loader: LoaderChoice::Vanilla,
             install_loader_version: String::new(),
             loader_versions: Vec::new(),
@@ -254,12 +330,26 @@ impl App {
             install_progress: None,
             installing: false,
             launch_version: String::new(),
-            launch_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
             launch_java: get_java_executable().unwrap_or_else(|| "java".to_owned()),
             installed: Vec::new(),
+            installed_dir: String::new(),
             installed_error: None,
             launching: false,
             isolate: false,
+            mod_query: String::new(),
+            mod_minecraft_version: String::new(),
+            mod_loader: None,
+            mod_instance_id: None,
+            mod_results: Vec::new(),
+            mod_total: 0,
+            mod_page: 1,
+            mod_searching: false,
+            mod_installing: None,
+            mod_notice: None,
+            mod_error: None,
+            installed_mods: HashMap::new(),
+            installed_mods_dir: String::new(),
+            mod_updates: HashMap::new(),
             logging_in: false,
             log: Vec::new(),
         };
@@ -313,16 +403,206 @@ impl App {
     }
 
     fn scan_installed(&mut self) {
-        let dir = PathBuf::from(self.launch_dir.trim());
+        let dir = PathBuf::from(self.minecraft_dir.trim());
+        self.installed_dir = self.minecraft_dir.trim().to_owned();
         match install::installed_versions(&dir) {
             Ok(versions) => {
                 self.installed_error = None;
-                if !versions.iter().any(|id| id == &self.launch_version) {
-                    self.launch_version = versions.first().cloned().unwrap_or_default();
+                let instances: Vec<InstalledInstance> = versions
+                    .into_iter()
+                    .map(|id| {
+                        let (loader, game_version) = inspect_instance(&dir, &id);
+                        InstalledInstance {
+                            id,
+                            loader,
+                            game_version,
+                        }
+                    })
+                    .collect();
+                if !instances
+                    .iter()
+                    .any(|instance| instance.id == self.launch_version)
+                {
+                    self.launch_version =
+                        instances.first().map(|instance| instance.id.clone()).unwrap_or_default();
                 }
-                self.installed = versions;
+                // 目录切换后，之前选中的模组安装目标可能已不存在
+                let stale_target = self.mod_instance_id.as_ref().is_some_and(|target| {
+                    !instances
+                        .iter()
+                        .any(|instance| &instance.id == target)
+                });
+                if stale_target {
+                    self.mod_instance_id = None;
+                }
+                self.installed = instances;
             }
-            Err(error) => self.installed_error = Some(error.to_string()),
+            Err(error) => {
+                self.installed.clear();
+                self.installed_error = Some(error.to_string());
+            }
+        }
+    }
+
+    /// The instance whose mods directory should receive downloads when isolation is on.
+    fn mods_target_instance(&self) -> Option<&str> {
+        self.mod_instance_id.as_deref().or_else(|| {
+            let launch = self.launch_version.trim();
+            (!launch.is_empty()).then_some(launch)
+        })
+    }
+
+    /// Version isolation runs the game from `versions/<id>`, so mods must live there too.
+    fn mods_target_dir(&self) -> PathBuf {
+        let base = PathBuf::from(self.minecraft_dir.trim());
+        match self.mods_target_instance() {
+            Some(instance) if self.isolate => base.join("versions").join(instance).join("mods"),
+            _ => base.join("mods"),
+        }
+    }
+
+    /// Read the manifest for `dir`, dropping entries whose jar is gone.
+    fn load_installed_mods(&mut self, dir: &Path) {
+        self.installed_mods_dir = dir.display().to_string();
+        self.installed_mods.clear();
+        self.mod_updates.clear();
+        let Ok(text) = std::fs::read_to_string(dir.join(MOD_MANIFEST_FILE)) else {
+            return;
+        };
+        if let Ok(manifest) = serde_json::from_str::<HashMap<String, ModRecord>>(&text) {
+            self.installed_mods.extend(
+                manifest
+                    .into_iter()
+                    .filter(|(_, record)| dir.join(&record.filename).is_file()),
+            );
+            return;
+        }
+        // 旧清单只记录了 slug -> 文件名，读进来至少还能显示为已安装
+        if let Ok(legacy) = serde_json::from_str::<HashMap<String, String>>(&text) {
+            for (key, filename) in legacy {
+                if dir.join(&filename).is_file() {
+                    self.installed_mods.insert(
+                        key,
+                        ModRecord {
+                            filename,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// Ask Modrinth whether any installed mod has a newer compatible version.
+    fn start_update_check(&mut self, ctx: &egui::Context, dir: &Path) {
+        self.mod_updates.clear();
+        let jobs: Vec<(String, String, String, String)> = self
+            .installed_mods
+            .iter()
+            .filter(|(_, record)| {
+                !record.version_id.is_empty()
+                    && !record.game_version.trim().is_empty()
+                    && !record.loader.trim().is_empty()
+            })
+            .map(|(key, record)| {
+                (
+                    key.clone(),
+                    record.version_id.clone(),
+                    record.game_version.clone(),
+                    record.loader.clone(),
+                )
+            })
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        let dir = dir.to_path_buf();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.handle.spawn(async move {
+            let mut updates = HashMap::new();
+            for (key, current, game_version, loader) in jobs {
+                if let Ok(Some((version_id, number))) =
+                    modrinth::latest_version(&key, &game_version, &loader).await
+                {
+                    if version_id != current {
+                        updates.insert(key, (version_id, number));
+                    }
+                }
+            }
+            let _ = tx.send(Message::ModUpdates { dir, updates });
+            ctx.request_repaint();
+        });
+    }
+
+    fn uninstall_mod(&mut self, key: &str, dir: &Path) {
+        if self.mod_installing.is_some() {
+            return;
+        }
+        self.mod_error = None;
+        self.mod_notice = None;
+        let Some(record) = self.installed_mods.remove(key) else {
+            return;
+        };
+        self.mod_updates.remove(key);
+        let mut removed = 0usize;
+        match std::fs::remove_file(dir.join(&record.filename)) {
+            Ok(()) => removed += 1,
+            Err(error) => {
+                self.mod_error = Some(format!("failed to remove {}: {error}", record.filename))
+            }
+        }
+        removed += self.remove_unused_dependencies(&record.dependencies, dir);
+        self.save_installed_mods(dir);
+        if self.mod_error.is_none() {
+            self.mod_notice = Some(format!(
+                "uninstalled {}, removed {removed} file(s)",
+                record.filename
+            ));
+        }
+    }
+
+    /// Remove auto-installed dependencies that are no longer required by another mod.
+    fn remove_unused_dependencies(&mut self, dependencies: &[String], dir: &Path) -> usize {
+        let mut removed = 0usize;
+        for key in dependencies {
+            let Some(record) = self.installed_mods.get(key).cloned() else {
+                continue;
+            };
+            // 手动安装的前置保留
+            if !record.auto || self.dependency_in_use(key) {
+                continue;
+            }
+            self.installed_mods.remove(key);
+            self.mod_updates.remove(key);
+            if std::fs::remove_file(dir.join(&record.filename)).is_ok() {
+                removed += 1;
+            }
+            removed += self.remove_unused_dependencies(&record.dependencies, dir);
+        }
+        removed
+    }
+
+    fn dependency_in_use(&self, key: &str) -> bool {
+        self.installed_mods.values().any(|record| {
+            record
+                .dependencies
+                .iter()
+                .any(|dependency| dependency == key)
+        })
+    }
+
+    fn save_installed_mods(&mut self, dir: &Path) {
+        match serde_json::to_string_pretty(&self.installed_mods) {
+            Ok(text) => {
+                if let Err(error) = std::fs::write(dir.join(MOD_MANIFEST_FILE), text) {
+                    self.log
+                        .push(format!("failed to write mod manifest: {error}"));
+                }
+            }
+            Err(error) => self
+                .log
+                .push(format!("failed to encode mod manifest: {error}")),
         }
     }
 
@@ -363,7 +643,7 @@ impl App {
             skipped: 0,
             current: None,
         });
-        let dir = PathBuf::from(self.install_dir.trim());
+        let dir = PathBuf::from(self.minecraft_dir.trim());
         let java = if self.java_path.trim().is_empty() {
             PathBuf::from("java")
         } else {
@@ -412,7 +692,7 @@ impl App {
             return;
         }
         self.launching = true;
-        let dir = PathBuf::from(self.launch_dir.trim());
+        let dir = PathBuf::from(self.minecraft_dir.trim());
         let java = if self.launch_java.trim().is_empty() {
             PathBuf::from("java")
         } else {
@@ -430,6 +710,94 @@ impl App {
             };
             let _ = tx.send(Message::Log(line));
             let _ = tx.send(Message::TaskDone(Task::Launch));
+            ctx.request_repaint();
+        });
+    }
+
+    fn start_mod_search(&mut self, ctx: &egui::Context) {
+        if self.mod_searching {
+            return;
+        }
+        self.mod_page = 1;
+        self.mod_results.clear();
+        self.mod_total = 0;
+        self.mod_notice = None;
+        self.request_mod_page(1, ctx);
+    }
+
+    /// 请求指定页的结果，返回后整页替换当前列表。
+    fn request_mod_page(&mut self, page: u32, ctx: &egui::Context) {
+        if self.mod_searching {
+            return;
+        }
+        self.mod_searching = true;
+        self.mod_error = None;
+        let query = self.mod_query.trim().to_owned();
+        let minecraft_version = self.mod_minecraft_version.trim().to_owned();
+        let loader = self.mod_loader.map(loader_slug);
+        let offset = (page - 1) * modrinth::PAGE_SIZE;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.handle.spawn(async move {
+            let game_version =
+                (!minecraft_version.is_empty()).then_some(minecraft_version.as_str());
+            let result = modrinth::search(ModSearchRequest {
+                query: &query,
+                game_version,
+                loader,
+                offset,
+            })
+            .await
+            .map_err(|error| error.to_string());
+            let _ = tx.send(Message::ModSearch { page, result });
+            ctx.request_repaint();
+        });
+    }
+
+    fn goto_mod_page(&mut self, page: u32, ctx: &egui::Context) {
+        if page == 0 || page == self.mod_page {
+            return;
+        }
+        self.request_mod_page(page, ctx);
+    }
+
+    fn start_mod_install(
+        &mut self,
+        project: String,
+        game_version: String,
+        loader: String,
+        ctx: &egui::Context,
+    ) {
+        if game_version.trim().is_empty() || loader.trim().is_empty() {
+            self.mod_error = Some("enter a Minecraft version and loader first".to_owned());
+            return;
+        }
+        if self.isolate && self.mods_target_instance().is_none() {
+            self.mod_error =
+                Some("version isolation is on, pick an instance to install into".to_owned());
+            return;
+        }
+        let mods_dir = self.mods_target_dir();
+        self.mod_installing = Some(project.clone());
+        self.mod_error = None;
+        self.mod_notice = None;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.handle.spawn(async move {
+            let result = modrinth::install_with_dependencies(
+                &project,
+                game_version.trim(),
+                &loader,
+                &mods_dir,
+            )
+            .await
+            .map_err(|error| error.to_string());
+            let _ = tx.send(Message::ModInstalled {
+                dir: mods_dir,
+                game_version,
+                loader,
+                result,
+            });
             ctx.request_repaint();
         });
     }
@@ -562,7 +930,7 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label("Minecraft dir:");
-            ui.add(egui::TextEdit::singleline(&mut self.install_dir).id_salt("install_dir"));
+            ui.add(egui::TextEdit::singleline(&mut self.minecraft_dir).id_salt("install_dir"));
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -592,7 +960,7 @@ impl App {
         ui.heading("Launch instance");
         ui.horizontal(|ui| {
             ui.label("Minecraft dir:");
-            ui.add(egui::TextEdit::singleline(&mut self.launch_dir).id_salt("launch_dir"));
+            ui.add(egui::TextEdit::singleline(&mut self.minecraft_dir).id_salt("launch_dir"));
             if ui.button("Scan installed").clicked() {
                 self.scan_installed();
             }
@@ -612,16 +980,16 @@ impl App {
                 .id_salt("launch_instances")
                 .max_height(160.0)
                 .show(ui, |ui| {
-                    for id in &self.installed {
-                        let label = match loader_tag(id) {
-                            Some(tag) => format!("{id}  · {tag}"),
-                            None => id.clone(),
+                    for instance in &self.installed {
+                        let label = match instance.loader {
+                            Some(tag) => format!("{}  · {tag}", instance.id),
+                            None => instance.id.clone(),
                         };
                         if ui
-                            .selectable_label(self.launch_version == id.as_str(), label)
+                            .selectable_label(self.launch_version == instance.id, label)
                             .clicked()
                         {
-                            self.launch_version = id.clone();
+                            self.launch_version = instance.id.clone();
                         }
                     }
                 });
@@ -642,6 +1010,390 @@ impl App {
                 ui.add(egui::widgets::Spinner::new().size(14.0));
             }
         });
+    }
+
+    fn mods_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Search mods");
+        ui.label(egui::RichText::new("Powered by Modrinth").weak());
+        ui.horizontal(|ui| {
+            ui.label("Query:");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.mod_query)
+                    .id_salt("mod_query")
+                    .hint_text("e.g. sodium")
+                    .desired_width(220.0),
+            );
+            let submitted =
+                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if ui
+                .add_enabled(!self.mod_searching, egui::Button::new("Search"))
+                .clicked()
+                || submitted
+            {
+                self.start_mod_search(ui.ctx());
+            }
+            if self.mod_searching {
+                ui.add(egui::widgets::Spinner::new().size(14.0));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Minecraft:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.mod_minecraft_version)
+                    .id_salt("mod_minecraft_version")
+                    .hint_text("any")
+                    .desired_width(100.0),
+            );
+            ui.label("Loader:");
+            egui::ComboBox::from_id_salt("mod_loader")
+                .selected_text(self.mod_loader.map(loader_label).unwrap_or("Any"))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.mod_loader, None, "Any");
+                    for kind in [
+                        LoaderKind::Fabric,
+                        LoaderKind::Quilt,
+                        LoaderKind::Forge,
+                        LoaderKind::NeoForge,
+                    ] {
+                        ui.selectable_value(&mut self.mod_loader, Some(kind), loader_label(kind));
+                    }
+                });
+            if !self.installed.is_empty() {
+                ui.label("From instance:");
+                let mut picked: Option<(String, Option<String>, Option<&'static str>)> = None;
+                egui::ComboBox::from_id_salt("mod_instance")
+                    .selected_text(self.mod_instance_id.as_deref().unwrap_or("pick…"))
+                    .show_ui(ui, |ui| {
+                        for instance in &self.installed {
+                            let label = match (instance.loader, &instance.game_version) {
+                                (Some(tag), Some(version)) => {
+                                    format!("{}  · {tag} {version}", instance.id)
+                                }
+                                (Some(tag), None) => format!("{}  · {tag}", instance.id),
+                                (None, Some(version)) => {
+                                    format!("{}  · {version}", instance.id)
+                                }
+                                (None, None) => instance.id.clone(),
+                            };
+                            if ui
+                                .selectable_label(
+                                    self.mod_instance_id.as_deref() == Some(instance.id.as_str()),
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                picked = Some((
+                                    instance.id.clone(),
+                                    instance.game_version.clone(),
+                                    instance.loader,
+                                ));
+                            }
+                        }
+                    });
+                if let Some((id, version, tag)) = picked {
+                    self.mod_instance_id = Some(id);
+                    if let Some(version) = version {
+                        self.mod_minecraft_version = version;
+                    }
+                    if let Some(tag) = tag {
+                        self.mod_loader = loader_kind(tag);
+                    }
+                }
+            }
+        });
+        if let Some(error) = &self.mod_error {
+            ui.label(format!("error: {error}"));
+        }
+        if let Some(notice) = &self.mod_notice {
+            ui.label(notice);
+        }
+        let mods_dir = self.mods_target_dir();
+        if self.installed_mods_dir != mods_dir.display().to_string() {
+            self.load_installed_mods(&mods_dir);
+            self.start_update_check(ui.ctx(), &mods_dir);
+        }
+        let isolated_suffix = if self.isolate { " (isolated)" } else { "" };
+        ui.label(
+            egui::RichText::new(format!(
+                "mods target: {}{isolated_suffix}",
+                mods_dir.display()
+            ))
+            .weak()
+            .small(),
+        );
+        if self.mod_results.is_empty() {
+            if !self.mod_searching && self.mod_error.is_none() {
+                ui.label("enter a query, optionally filter by Minecraft version and loader");
+            }
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{} results (showing {})",
+                    self.mod_total,
+                    self.mod_results.len()
+                ));
+                if ui.small_button("Reload icons").clicked() {
+                    ui.ctx().forget_all_images();
+                }
+            });
+            let target_ready = !self.isolate || self.mods_target_instance().is_some();
+            let filters_ready = target_ready
+                && !self.mod_minecraft_version.trim().is_empty()
+                && self.mod_loader.is_some();
+            if !target_ready {
+                ui.label(
+                    egui::RichText::new(
+                        "version isolation is on: pick an instance to install mods into",
+                    )
+                    .weak()
+                    .small(),
+                );
+            } else if !filters_ready {
+                ui.label(
+                    egui::RichText::new("set a Minecraft version and loader to install mods")
+                        .weak()
+                        .small(),
+                );
+            }
+            let mut pending: Option<(ModAction, String, Option<String>)> = None;
+            // 给底部分页控件留出空间，避免滚动区占满高度把按钮挤出可视区域
+            let pager_height = 40.0;
+            let list_height = (ui.available_height() - pager_height).max(80.0);
+            egui::ScrollArea::vertical()
+                .id_salt("mod_results")
+                .max_height(list_height)
+                .show(ui, |ui| {
+                    for hit in &self.mod_results {
+                        let project_id = if hit.project_id.trim().is_empty() {
+                            hit.slug.clone()
+                        } else {
+                            hit.project_id.clone()
+                        };
+                        let installed_key = if self.installed_mods.contains_key(&project_id) {
+                            Some(project_id.clone())
+                        } else if self.installed_mods.contains_key(&hit.slug) {
+                            Some(hit.slug.clone())
+                        } else {
+                            None
+                        };
+                        let installed_version = installed_key
+                            .as_ref()
+                            .and_then(|key| self.installed_mods.get(key))
+                            .map(|record| record.version_number.as_str());
+                        let update_number = installed_key
+                            .as_ref()
+                            .and_then(|key| self.mod_updates.get(key))
+                            .map(|(_, number)| number.as_str());
+                        let installing_this =
+                            self.mod_installing.as_deref() == Some(project_id.as_str());
+                        let actions_enabled = self.mod_installing.is_none();
+                        if let Some(action) = mod_result(
+                            ui,
+                            hit,
+                            target_ready,
+                            filters_ready,
+                            actions_enabled,
+                            installing_this,
+                            installed_version,
+                            update_number,
+                        ) {
+                            pending = Some((action, project_id, installed_key));
+                        }
+                    }
+                });
+            if let Some((action, project_id, key)) = pending {
+                match action {
+                    ModAction::Uninstall => {
+                        if let Some(key) = key {
+                            self.uninstall_mod(&key, &mods_dir);
+                        }
+                    }
+                    ModAction::Install => {
+                        let game_version = self.mod_minecraft_version.trim().to_owned();
+                        match self.mod_loader {
+                            Some(loader) if !game_version.is_empty() => {
+                                self.start_mod_install(
+                                    project_id,
+                                    game_version,
+                                    loader_slug(loader).to_owned(),
+                                    ui.ctx(),
+                                );
+                            }
+                            _ => {
+                                self.mod_error = Some(
+                                    "enter a Minecraft version and loader before installing"
+                                        .to_owned(),
+                                )
+                            }
+                        }
+                    }
+                    ModAction::Reinstall | ModAction::Update => {
+                        let record = key.and_then(|key| self.installed_mods.get(&key).cloned());
+                        if let Some(record) = record {
+                            // 旧清单没有记录版本与加载器，回退到当前筛选条件
+                            let game_version = if record.game_version.trim().is_empty() {
+                                self.mod_minecraft_version.trim().to_owned()
+                            } else {
+                                record.game_version.clone()
+                            };
+                            let loader = if record.loader.trim().is_empty() {
+                                self.mod_loader
+                                    .map(|kind| loader_slug(kind).to_owned())
+                                    .unwrap_or_default()
+                            } else {
+                                record.loader.clone()
+                            };
+                            self.start_mod_install(project_id, game_version, loader, ui.ctx());
+                        }
+                    }
+                }
+            }
+            let page_size = u64::from(modrinth::PAGE_SIZE);
+            let total_pages = self.mod_total.div_ceil(page_size).max(1) as u32;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        self.mod_page > 1 && !self.mod_searching,
+                        egui::Button::new("Previous"),
+                    )
+                    .clicked()
+                {
+                    self.goto_mod_page(self.mod_page - 1, ui.ctx());
+                }
+                ui.label(format!("Page {} / {}", self.mod_page, total_pages));
+                if ui
+                    .add_enabled(
+                        self.mod_page < total_pages && !self.mod_searching,
+                        egui::Button::new("Next"),
+                    )
+                    .clicked()
+                {
+                    self.goto_mod_page(self.mod_page + 1, ui.ctx());
+                }
+            });
+        }
+    }
+}
+
+fn mod_result(
+    ui: &mut egui::Ui,
+    hit: &ModSearchHit,
+    target_ready: bool,
+    filters_ready: bool,
+    actions_enabled: bool,
+    installing: bool,
+    installed_version: Option<&str>,
+    update_number: Option<&str>,
+) -> Option<ModAction> {
+    let mut action = None;
+    let installed = installed_version.is_some();
+    ui.group(|ui| {
+        ui.horizontal_top(|ui| {
+            if let Some(icon_url) = &hit.icon_url {
+                ui.add(
+                    egui::Image::new(icon_url.as_str()).fit_to_exact_size(egui::vec2(48.0, 48.0)),
+                );
+            }
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&hit.title).strong());
+                    ui.label(egui::RichText::new(format!("{} downloads", hit.downloads)).weak());
+                });
+                if !hit.description.is_empty() {
+                    ui.label(&hit.description);
+                }
+                let mut meta = hit.categories.join(", ");
+                if !hit.versions.is_empty() {
+                    if !meta.is_empty() {
+                        meta.push_str(" · ");
+                    }
+                    meta.push_str(
+                        &hit.versions
+                            .iter()
+                            .take(5)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                }
+                if !meta.is_empty() {
+                    ui.label(egui::RichText::new(meta).weak().small());
+                }
+                if let Some(version) = installed_version {
+                    let label = if version.is_empty() {
+                        "installed".to_owned()
+                    } else {
+                        format!("installed v{version}")
+                    };
+                    ui.label(egui::RichText::new(label).weak().small());
+                }
+                ui.horizontal(|ui| {
+                    if installing {
+                        ui.add(egui::widgets::Spinner::new().size(12.0));
+                    }
+                    if installed {
+                        if ui
+                            .add_enabled(actions_enabled && target_ready, egui::Button::new("Uninstall"))
+                            .clicked()
+                        {
+                            action = Some(ModAction::Uninstall);
+                        }
+                        if ui
+                            .add_enabled(
+                                actions_enabled && target_ready,
+                                egui::Button::new("Reinstall"),
+                            )
+                            .clicked()
+                        {
+                            action = Some(ModAction::Reinstall);
+                        }
+                        if let Some(number) = update_number {
+                            if ui
+                                .add_enabled(
+                                    actions_enabled && target_ready,
+                                    egui::Button::new(format!("Update to {number}")),
+                                )
+                                .clicked()
+                            {
+                                action = Some(ModAction::Update);
+                            }
+                        }
+                    } else if ui
+                        .add_enabled(
+                            actions_enabled && target_ready && filters_ready,
+                            egui::Button::new("Install to mods"),
+                        )
+                        .clicked()
+                    {
+                        action = Some(ModAction::Install);
+                    }
+                    ui.hyperlink_to(
+                        "Open on Modrinth",
+                        format!("https://modrinth.com/mod/{}", hit.slug),
+                    );
+                });
+            });
+        });
+    });
+    ui.add_space(4.0);
+    action
+}
+
+fn loader_label(kind: LoaderKind) -> &'static str {
+    match kind {
+        LoaderKind::Fabric => "Fabric",
+        LoaderKind::Quilt => "Quilt",
+        LoaderKind::Forge => "Forge",
+        LoaderKind::NeoForge => "NeoForge",
+    }
+}
+
+fn loader_slug(kind: LoaderKind) -> &'static str {
+    match kind {
+        LoaderKind::Fabric => "fabric",
+        LoaderKind::Quilt => "quilt",
+        LoaderKind::Forge => "forge",
+        LoaderKind::NeoForge => "neoforge",
     }
 }
 
@@ -712,6 +1464,49 @@ fn loader_tag(version_id: &str) -> Option<&'static str> {
     }
 }
 
+fn inspect_instance(minecraft_dir: &Path, version_id: &str) -> (Option<&'static str>, Option<String>) {
+    let path = minecraft_dir
+        .join("versions")
+        .join(version_id)
+        .join(format!("{version_id}.json"));
+    let Ok(json) = std::fs::read_to_string(&path) else {
+        return (loader_tag(version_id), None);
+    };
+    let loader = loader_tag(version_id).or_else(|| {
+        if json.contains("net.fabricmc") {
+            Some("Fabric")
+        } else if json.contains("org.quiltmc") {
+            Some("Quilt")
+        } else if json.contains("net.neoforged") {
+            Some("NeoForge")
+        } else if json.contains("net.minecraftforge") {
+            Some("Forge")
+        } else {
+            None
+        }
+    });
+    let game_version = serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("inheritsFrom")
+                .and_then(|version| version.as_str())
+                .map(str::to_owned)
+        })
+        .or_else(|| Some(version_id.to_owned()));
+    (loader, game_version)
+}
+
+fn loader_kind(tag: &str) -> Option<LoaderKind> {
+    match tag {
+        "Fabric" => Some(LoaderKind::Fabric),
+        "Quilt" => Some(LoaderKind::Quilt),
+        "Forge" => Some(LoaderKind::Forge),
+        "NeoForge" => Some(LoaderKind::NeoForge),
+        _ => None,
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -757,12 +1552,111 @@ impl eframe::App for App {
                         Err(error) => self.loader_versions_error = Some(error),
                     }
                 }
+                Message::ModSearch { page, result } => {
+                    self.mod_searching = false;
+                    match result {
+                        Ok(result) => {
+                            self.mod_page = page;
+                            self.mod_results = result.hits;
+                            self.mod_total = result.total_hits;
+                            self.mod_error = None;
+                        }
+                        Err(error) => self.mod_error = Some(error),
+                    }
+                }
+                Message::ModInstalled {
+                    dir,
+                    game_version,
+                    loader,
+                    result,
+                } => {
+                    self.mod_installing = None;
+                    match result {
+                        Ok(outcome) => {
+                            for (index, installed) in outcome.installed.iter().enumerate() {
+                                let old = self.installed_mods.get(&installed.project_id).cloned();
+                                // 旧清单用 slug 作键，重装后清掉指向同一个 jar 的旧记录
+                                let duplicate = self
+                                    .installed_mods
+                                    .iter()
+                                    .find(|(key, record)| {
+                                        key.as_str() != installed.project_id.as_str()
+                                            && record.filename == installed.filename
+                                    })
+                                    .map(|(key, _)| key.clone());
+                                if let Some(duplicate) = duplicate {
+                                    self.installed_mods.remove(&duplicate);
+                                }
+                                if let Some(old) = &old {
+                                    if old.filename != installed.filename {
+                                        let _ = std::fs::remove_file(dir.join(&old.filename));
+                                    }
+                                }
+                                // 用户主动安装的模组不再算作自动前置
+                                let auto = if index == 0 {
+                                    false
+                                } else {
+                                    old.map(|record| record.auto).unwrap_or(true)
+                                };
+                                self.installed_mods.insert(
+                                    installed.project_id.clone(),
+                                    ModRecord {
+                                        filename: installed.filename.clone(),
+                                        version_id: installed.version_id.clone(),
+                                        version_number: installed.version_number.clone(),
+                                        game_version: game_version.clone(),
+                                        loader: loader.clone(),
+                                        auto,
+                                        dependencies: installed.dependencies.clone(),
+                                    },
+                                );
+                                self.mod_updates.remove(&installed.project_id);
+                            }
+                            self.save_installed_mods(&dir);
+                            let root_name = outcome
+                                .root()
+                                .map(|installed| installed.filename.as_str())
+                                .unwrap_or("mod");
+                            let dependencies = outcome.installed.len().saturating_sub(1);
+                            let mut notice =
+                                format!("installed {root_name} into {}", dir.display());
+                            if dependencies > 0 {
+                                notice.push_str(&format!(" (+{dependencies} dependencies)"));
+                            }
+                            if !outcome.skipped.is_empty() {
+                                notice.push_str(&format!(
+                                    "; missing dependencies: {}",
+                                    outcome.skipped.join(", ")
+                                ));
+                            }
+                            self.mod_notice = Some(notice);
+                        }
+                        Err(error) => self.mod_error = Some(error),
+                    }
+                }
+                Message::ModUpdates { dir, updates } => {
+                    if dir.display().to_string() == self.installed_mods_dir {
+                        self.mod_updates = updates
+                            .into_iter()
+                            .filter(|(key, (latest, _))| {
+                                self.installed_mods
+                                    .get(key)
+                                    .map_or(false, |record| &record.version_id != latest)
+                            })
+                            .collect();
+                    }
+                }
             }
         }
 
         if !self.versions_requested {
             self.versions_requested = true;
             self.reload_versions(&ctx);
+        }
+
+        let current_dir = self.minecraft_dir.trim().to_owned();
+        if current_dir != self.installed_dir {
+            self.scan_installed();
         }
 
         egui::Panel::top("accounts").show(ui, |ui| {
@@ -821,8 +1715,9 @@ impl eframe::App for App {
         });
 
         egui::Panel::bottom("log")
-            .resizable(true)
+            .resizable(false)
             .min_size(120.0)
+            .max_size(120.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
@@ -838,11 +1733,13 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.page, Page::Install, "Install instance");
                 ui.selectable_value(&mut self.page, Page::Launch, "Launch instance");
+                ui.selectable_value(&mut self.page, Page::Mods, "Search mods");
             });
             ui.separator();
             match self.page {
                 Page::Install => self.install_page(ui),
                 Page::Launch => self.launch_page(ui),
+                Page::Mods => self.mods_page(ui),
             }
         });
     }
