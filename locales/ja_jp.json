@@ -171,5 +171,11 @@
   "files: {}, size: {}": "ファイル数 {}, サイズ {}",
   "modpack has no Minecraft version": "ModpackにMinecraftのバージョンが指定されていません",
   "this archive is not a supported modpack": "このアーカイブは対応しているModpack形式ではありません",
-  "author: {}": "作者: {}"
+  "author: {}": "作者: {}",
+  "manifest parsed in {}": "整合包の解析 {}",
+  "metadata resolved in {}": "メタデータの解析 {}",
+  "Minecraft installed in {}": "Minecraft のインストール {}",
+  "loader installed in {}": "ローダーのインストール {}",
+  "files downloaded in {}": "ファイルのダウンロード {}",
+  "overrides extracted in {}": "上書きファイルの展開 {}"
 }

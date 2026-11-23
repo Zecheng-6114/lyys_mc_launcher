@@ -1,8 +1,11 @@
 //! MCBBS 整合包（`mcbbs.packmeta`，部分包也用 `manifest.json`）。
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use serde_json::Value;
 
-use super::curseforge::Client;
+use super::curseforge::{Client, FileRequest, resolve_many};
 use super::{
     ModpackError, PackFile, PackManifest, Provider, encode_path, loader_spec, normalize_name,
     safe_relative,
@@ -46,27 +49,49 @@ pub async fn parse(manifest: &Value) -> Result<PackManifest, ModpackError> {
         .as_str()
         .map(|url| url.trim_end_matches('/').to_owned());
 
-    let mut client = Client::new();
+    // 先收集所有 CurseForge 条目，并发解析后复用，避免逐个等待网络
+    let mut requests = Vec::new();
+    for entry in manifest["files"].as_array().into_iter().flatten() {
+        if entry["type"].as_str().unwrap_or("addon") != "curse" {
+            continue;
+        }
+        let (Some(project_id), Some(file_id)) =
+            (entry["projectID"].as_i64(), entry["fileID"].as_i64())
+        else {
+            continue;
+        };
+        requests.push(FileRequest {
+            project_id,
+            file_id,
+            file_name: entry["fileName"].as_str().map(str::to_owned),
+            url: entry["url"].as_str().map(str::to_owned),
+            class_id: entry["classId"].as_i64(),
+        });
+    }
+    let resolved = if requests.is_empty() {
+        HashMap::new()
+    } else {
+        resolve_many(Arc::new(Client::new()), requests).await
+    };
+
     let mut files = Vec::new();
     for entry in manifest["files"].as_array().into_iter().flatten() {
         let kind = entry["type"].as_str().unwrap_or("addon");
         let optional = entry["required"].as_bool() == Some(false) || entry["force"].as_bool() == Some(false);
         if kind == "curse" {
-            let Some(project_id) = entry["projectID"].as_i64() else {
+            let (Some(project_id), Some(file_id)) =
+                (entry["projectID"].as_i64(), entry["fileID"].as_i64())
+            else {
                 continue;
             };
-            let Some(file_id) = entry["fileID"].as_i64() else {
-                continue;
+            let Some(resolved) = resolved.get(&(project_id, file_id)) else {
+                return Err(ModpackError::Download(format!(
+                    "CurseForge file {project_id}/{file_id} could not be resolved"
+                )));
             };
-            let resolved = client
-                .resolve_file(
-                    project_id,
-                    file_id,
-                    entry["fileName"].as_str(),
-                    entry["url"].as_str(),
-                    entry["classId"].as_i64(),
-                )
-                .await?;
+            let resolved = resolved
+                .as_ref()
+                .map_err(|error| ModpackError::Download(error.to_owned()))?;
             if !accept(&format!("{}/x", resolved.category()), install_mods, install_resourcepacks) {
                 continue;
             }
@@ -76,9 +101,9 @@ pub async fn parse(manifest: &Value) -> Result<PackManifest, ModpackError> {
             files.push(PackFile {
                 path,
                 size: entry["fileLength"].as_u64(),
-                sha1: resolved.sha1,
+                sha1: resolved.sha1.clone(),
                 sha512: None,
-                urls: vec![resolved.url],
+                urls: vec![resolved.url.clone()],
                 optional,
                 client_unsupported: false,
             });

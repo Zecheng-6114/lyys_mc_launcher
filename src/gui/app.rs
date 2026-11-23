@@ -604,6 +604,7 @@ impl eframe::App for App {
                             self.modpack_notice =
                                 Some(tf("modpack installed: {}", &[version.as_str()]));
                             self.log.push(tf("modpack installed: {}", &[version.as_str()]));
+                            self.log.push(report.timings.summary());
                             self.launch_version = version;
                             self.scan_installed();
                         }

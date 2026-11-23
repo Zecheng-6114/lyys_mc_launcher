@@ -623,17 +623,10 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
     };
     println!("{}", t("installing modpack..."));
     let reporter = Arc::new(|progress: PackProgress| {
-        let line = match progress.stage {
-            "loader" => format!("{} {}", t("installing loader"), progress.done),
-            "files" => format!(
-                "{} {}/{}",
-                t("downloading files"),
-                progress.done,
-                progress.total
-            ),
-            "overrides" => t("extracting overrides").to_owned(),
-            _ => return,
-        };
+        let line = progress.describe();
+        if line.is_empty() {
+            return;
+        }
         print!("\r{line}");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     });
@@ -646,6 +639,7 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
         "{}",
         tf("modpack installed: {}", &[report.version_id.as_str()])
     );
+    println!("{}", report.timings.summary());
     let files = report.files.to_string();
     let overrides = report.overrides.to_string();
     println!(

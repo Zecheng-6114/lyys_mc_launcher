@@ -634,19 +634,7 @@ impl App {
                 with_optional,
             };
             let reporter = Arc::new(move |progress: PackProgress| {
-                let line = match progress.stage {
-                    "loader" => {
-                        format!("{} {}", t("installing loader"), progress.done)
-                    }
-                    "files" => format!(
-                        "{} {}/{}",
-                        t("downloading files"),
-                        progress.done,
-                        progress.total
-                    ),
-                    _ => t("extracting overrides").to_owned(),
-                };
-                let _ = progress_tx.send(Message::ModpackProgress(line));
+                let _ = progress_tx.send(Message::ModpackProgress(progress.describe()));
                 progress_ctx.request_repaint();
             });
             let result = modpack::install_file(&path, &options, reporter)
@@ -742,6 +730,11 @@ impl App {
         self.mod_error = None;
         self.mod_notice = None;
         if kind == ProjectType::Modpack {
+            // 与本地安装共用同一套进度展示
+            self.modpack_installing = true;
+            self.modpack_progress = Some(t("installing modpack...").to_owned());
+            self.modpack_notice = None;
+            self.modpack_error = None;
             let minecraft_dir = PathBuf::from(if self.minecraft_dir.trim().is_empty() {
                 DEFAULT_MINECRAFT_DIR
             } else {
@@ -757,14 +750,22 @@ impl App {
                 .unwrap_or_else(|| PathBuf::from("java"));
             let loader = loader.unwrap_or_default();
             let tx = self.tx.clone();
+            let progress_tx = self.tx.clone();
             let ctx = ctx.clone();
+            let progress_ctx = ctx.clone();
             self.handle.spawn(async move {
+                // 在线安装同样用真实进度回调，而不是空回调
+                let reporter = Arc::new(move |progress: PackProgress| {
+                    let _ = progress_tx.send(Message::ModpackProgress(progress.describe()));
+                    progress_ctx.request_repaint();
+                });
                 let result = install_modpack_from_modrinth(
                     &project,
                     game_version.trim(),
                     &loader,
                     &minecraft_dir,
                     &java,
+                    reporter,
                 )
                 .await;
                 let _ = tx.send(Message::ModpackDone(result.map_err(|error| error.to_string())));
@@ -809,6 +810,7 @@ async fn install_modpack_from_modrinth(
     loader: &str,
     minecraft_dir: &Path,
     java: &Path,
+    reporter: Arc<dyn Fn(PackProgress) + Send + Sync>,
 ) -> Result<modpack::InstallReport, String> {
     let cache = config::cache_dir()
         .map(|dir| dir.join("modpacks"))
@@ -823,7 +825,7 @@ async fn install_modpack_from_modrinth(
         java,
         with_optional: false,
     };
-    let result = modpack::install_file(&archive, &options, Arc::new(|_: PackProgress| {})).await;
+    let result = modpack::install_file(&archive, &options, reporter).await;
     let _ = std::fs::remove_file(&archive);
     result.map_err(|error| error.to_string())
 }

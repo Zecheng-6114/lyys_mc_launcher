@@ -171,5 +171,11 @@
   "files: {}, size: {}": "檔案數 {}，大小 {}",
   "modpack has no Minecraft version": "整合包沒有指定 Minecraft 版本",
   "this archive is not a supported modpack": "這個壓縮檔不是支援的整合包格式",
-  "author: {}": "作者：{}"
+  "author: {}": "作者：{}",
+  "manifest parsed in {}": "整合包解析 {}",
+  "metadata resolved in {}": "元資料解析 {}",
+  "Minecraft installed in {}": "Minecraft 安裝 {}",
+  "loader installed in {}": "載入器安裝 {}",
+  "files downloaded in {}": "檔案下載 {}",
+  "overrides extracted in {}": "覆寫解壓 {}"
 }

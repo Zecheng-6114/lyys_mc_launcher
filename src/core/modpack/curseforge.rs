@@ -3,18 +3,24 @@
 //! 清单里通常只有 projectID/fileID；解析下载地址需要 `CURSEFORGE_API_KEY`，
 //! 若清单已自带 `fileName` 与 `url` 则不需要联网。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::Value;
+use tokio::task::JoinSet;
 
 use super::{
-    ModpackError, PackFile, PackManifest, Provider, USER_AGENT, encode_path, loader_spec,
-    safe_relative,
+    METADATA_CONCURRENCY, ModpackError, PackFile, PackManifest, Provider, encode_path, http_client,
+    loader_spec, safe_relative,
 };
 
 const CURSE_API: &str = "https://api.curseforge.com";
 const CURSE_CDN: &str = "https://edge.forgecdn.net/files";
+/// 元数据请求的最大尝试次数。
+const META_ATTEMPTS: usize = 3;
 
+#[derive(Clone)]
 pub struct CurseFile {
     pub file_name: String,
     pub url: String,
@@ -43,46 +49,53 @@ fn category_of(class_id: Option<i64>, file_name: &str) -> &'static str {
     }
 }
 
-/// CurseForge API 客户端，按项目缓存 classId。
+/// 一个待解析的清单条目；持有 String 便于并发任务直接 move 进去。
+#[derive(Clone)]
+pub(crate) struct FileRequest {
+    pub project_id: i64,
+    pub file_id: i64,
+    pub file_name: Option<String>,
+    pub url: Option<String>,
+    pub class_id: Option<i64>,
+}
+
+/// CurseForge API 客户端，按项目缓存 classId，可在多个任务间共享。
 pub struct Client {
     api_key: Option<String>,
-    classes: HashMap<i64, i64>,
+    classes: Mutex<HashMap<i64, i64>>,
     http: reqwest::Client,
 }
 
 impl Client {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             api_key: std::env::var("CURSEFORGE_API_KEY")
                 .ok()
                 .filter(|key| !key.trim().is_empty()),
-            classes: HashMap::new(),
-            http: reqwest::Client::builder()
-                .user_agent(USER_AGENT)
-                .build()
-                .unwrap_or_default(),
+            classes: Mutex::new(HashMap::new()),
+            http: http_client().clone(),
         }
     }
 
-    pub async fn resolve_file(
-        &mut self,
-        project_id: i64,
-        file_id: i64,
-        file_name: Option<&str>,
-        url: Option<&str>,
-        class_id_hint: Option<i64>,
-    ) -> Result<CurseFile, ModpackError> {
+    pub(crate) async fn resolve_file(&self, request: &FileRequest) -> Result<CurseFile, ModpackError> {
+        let FileRequest {
+            project_id,
+            file_id,
+            file_name,
+            url,
+            class_id,
+        } = request;
         if let (Some(file_name), Some(url)) = (file_name, url)
             && !file_name.is_empty()
             && !url.is_empty()
         {
-            let class_id = match class_id_hint {
-                Some(class_id) => Some(class_id),
-                None => self.class_id(project_id).await.ok(),
+            let class_id = match class_id {
+                Some(class_id) => Some(*class_id),
+                None => self.class_id(*project_id).await.ok(),
             };
             return Ok(CurseFile {
-                file_name: file_name.to_owned(),
-                url: url.to_owned(),
+                file_name: file_name.clone(),
+                url: url.clone(),
                 sha1: None,
                 class_id,
             });
@@ -107,7 +120,7 @@ impl Client {
             .as_str()
             .filter(|url| !url.is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| curse_cdn_url(file_id, file_name));
+            .unwrap_or_else(|| curse_cdn_url(*file_id, file_name));
         let sha1 = data["hashes"]
             .as_array()
             .into_iter()
@@ -115,9 +128,9 @@ impl Client {
             .find(|hash| hash["algo"].as_i64() == Some(1))
             .and_then(|hash| hash["value"].as_str())
             .map(str::to_owned);
-        let class_id = match class_id_hint {
-            Some(class_id) => Some(class_id),
-            None => self.class_id(project_id).await.ok(),
+        let class_id = match class_id {
+            Some(class_id) => Some(*class_id),
+            None => self.class_id(*project_id).await.ok(),
         };
         Ok(CurseFile {
             file_name: file_name.to_owned(),
@@ -127,9 +140,9 @@ impl Client {
         })
     }
 
-    async fn class_id(&mut self, project_id: i64) -> Result<i64, ModpackError> {
-        if let Some(class_id) = self.classes.get(&project_id) {
-            return Ok(*class_id);
+    async fn class_id(&self, project_id: i64) -> Result<i64, ModpackError> {
+        if let Some(class_id) = self.cached_class(project_id) {
+            return Ok(class_id);
         }
         let data = self
             .get_json(&format!("{CURSE_API}/v1/mods/{project_id}"))
@@ -142,8 +155,17 @@ impl Client {
         let class_id = data["classId"].as_i64().ok_or_else(|| {
             ModpackError::Parse(format!("CurseForge project {project_id} has no classId"))
         })?;
-        self.classes.insert(project_id, class_id);
+        if let Ok(mut classes) = self.classes.lock() {
+            classes.insert(project_id, class_id);
+        }
         Ok(class_id)
+    }
+
+    fn cached_class(&self, project_id: i64) -> Option<i64> {
+        self.classes
+            .lock()
+            .ok()
+            .and_then(|classes| classes.get(&project_id).copied())
     }
 
     async fn get_json(&self, url: &str) -> Result<Value, ModpackError> {
@@ -152,20 +174,115 @@ impl Client {
                 "CURSEFORGE_API_KEY is required to resolve CurseForge files".to_owned(),
             )
         })?;
-        let response = self
-            .http
-            .get(url)
-            .header("X-API-KEY", key)
-            .header("Accept", "application/json")
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(ModpackError::Parse(format!(
-                "CurseForge API returned {} for {url}",
-                response.status()
-            )));
+        let mut last_error = None;
+        for attempt in 1..=META_ATTEMPTS {
+            let response = match self
+                .http
+                .get(url)
+                .header("X-API-KEY", key)
+                .header("Accept", "application/json")
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    // 连接被重置之类的临时问题，退避后重试
+                    last_error = Some(error.to_string());
+                    if attempt < META_ATTEMPTS {
+                        tokio::time::sleep(backoff(attempt)).await;
+                    }
+                    continue;
+                }
+            };
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response.json().await?);
+            }
+            last_error = Some(format!("CurseForge API returned {status} for {url}"));
+            let transient =
+                status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            if transient && attempt < META_ATTEMPTS {
+                tokio::time::sleep(backoff(attempt)).await;
+                continue;
+            }
+            break;
         }
-        Ok(response.json().await?)
+        Err(ModpackError::Parse(last_error.unwrap_or_else(|| {
+            format!("CurseForge request failed: {url}")
+        })))
+    }
+}
+
+fn backoff(attempt: usize) -> Duration {
+    Duration::from_millis(400 * attempt as u64)
+}
+
+/// 有界并发解析清单条目：同一 (projectID, fileID) 只请求一次，失败不影响其他条目。
+pub(crate) async fn resolve_many(
+    client: Arc<Client>,
+    requests: Vec<FileRequest>,
+) -> HashMap<(i64, i64), Result<CurseFile, String>> {
+    let mut unique = Vec::new();
+    let mut seen = HashSet::new();
+    for request in requests {
+        if seen.insert((request.project_id, request.file_id)) {
+            unique.push(request);
+        }
+    }
+
+    // 先按项目维度补齐 classId，避免同一项目的多个文件重复查询
+    prefetch_classes(&client, &unique).await;
+
+    let mut files = HashMap::with_capacity(unique.len());
+    let mut set = JoinSet::new();
+    let mut next = 0;
+    while next < unique.len() || !set.is_empty() {
+        while next < unique.len() && set.len() < METADATA_CONCURRENCY {
+            let request = unique[next].clone();
+            next += 1;
+            let client = Arc::clone(&client);
+            set.spawn(async move {
+                let key = (request.project_id, request.file_id);
+                (key, client.resolve_file(&request).await.map_err(|error| error.to_string()))
+            });
+        }
+        if let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((key, result)) => {
+                    files.insert(key, result);
+                }
+                // 任务异常时该条目缺失，由调用方按缺失的键报错
+                Err(_) => {}
+            }
+        }
+    }
+    files
+}
+
+/// 并发补齐缺失的 classId，结果写进客户端缓存。
+async fn prefetch_classes(client: &Arc<Client>, requests: &[FileRequest]) {
+    let mut project_ids = HashSet::new();
+    for request in requests {
+        if request.class_id.is_none() && client.cached_class(request.project_id).is_none() {
+            project_ids.insert(request.project_id);
+        }
+    }
+    let mut ids: Vec<i64> = project_ids.into_iter().collect();
+    ids.sort_unstable();
+
+    let mut set = JoinSet::new();
+    let mut next = 0;
+    while next < ids.len() || !set.is_empty() {
+        while next < ids.len() && set.len() < METADATA_CONCURRENCY {
+            let project_id = ids[next];
+            next += 1;
+            let client = Arc::clone(client);
+            set.spawn(async move {
+                // 没有 API Key 时查询会失败，这里静默跳过，交给文件解析阶段决定
+                let _ = client.class_id(project_id).await;
+            });
+        }
+        let _ = set.join_next().await;
     }
 }
 
@@ -182,8 +299,16 @@ pub async fn parse(manifest: &Value) -> Result<PackManifest, ModpackError> {
         .to_owned();
     let loader = parse_loader(&manifest["minecraft"]["modLoaders"])?;
 
-    let mut client = Client::new();
-    let mut files = Vec::new();
+    struct Entry {
+        project_id: i64,
+        file_id: i64,
+        size: Option<u64>,
+        sha1: Option<String>,
+        optional: bool,
+    }
+
+    let mut requests = Vec::new();
+    let mut entries = Vec::new();
     for entry in manifest["files"].as_array().into_iter().flatten() {
         let Some(project_id) = entry["projectID"].as_i64() else {
             continue;
@@ -191,35 +316,53 @@ pub async fn parse(manifest: &Value) -> Result<PackManifest, ModpackError> {
         let Some(file_id) = entry["fileID"].as_i64() else {
             continue;
         };
-        let resolved = client
-            .resolve_file(
-                project_id,
-                file_id,
-                entry["fileName"].as_str(),
-                entry["url"].as_str(),
-                entry["classId"].as_i64(),
-            )
-            .await?;
+        requests.push(FileRequest {
+            project_id,
+            file_id,
+            file_name: entry["fileName"].as_str().map(str::to_owned),
+            url: entry["url"].as_str().map(str::to_owned),
+            class_id: entry["classId"].as_i64(),
+        });
+        entries.push(Entry {
+            project_id,
+            file_id,
+            size: entry["fileLength"].as_u64(),
+            sha1: entry["hashes"]
+                .as_array()
+                .and_then(|hashes| {
+                    hashes
+                        .iter()
+                        .find(|hash| hash["algo"].as_i64() == Some(1))
+                        .and_then(|hash| hash["value"].as_str())
+                })
+                .map(str::to_owned),
+            optional: entry["required"].as_bool() == Some(false),
+        });
+    }
+
+    let resolved = resolve_many(Arc::new(Client::new()), requests).await;
+    let mut files = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let resolved = resolved
+            .get(&(entry.project_id, entry.file_id))
+            .ok_or_else(|| {
+                ModpackError::Download(format!(
+                    "CurseForge file {}/{} could not be resolved",
+                    entry.project_id, entry.file_id
+                ))
+            })?
+            .as_ref()
+            .map_err(|error| ModpackError::Download(error.to_owned()))?;
         let path = safe_relative(&format!("{}/{}", resolved.category(), resolved.file_name))?
             .to_string_lossy()
             .replace('\\', "/");
-        let sha1 = entry["hashes"]
-            .as_array()
-            .and_then(|hashes| {
-                hashes
-                    .iter()
-                    .find(|hash| hash["algo"].as_i64() == Some(1))
-                    .and_then(|hash| hash["value"].as_str())
-            })
-            .map(str::to_owned)
-            .or(resolved.sha1);
         files.push(PackFile {
             path,
-            size: entry["fileLength"].as_u64(),
-            sha1,
+            size: entry.size,
+            sha1: entry.sha1.or_else(|| resolved.sha1.clone()),
             sha512: None,
-            urls: vec![resolved.url],
-            optional: entry["required"].as_bool() == Some(false),
+            urls: vec![resolved.url.clone()],
+            optional: entry.optional,
             client_unsupported: false,
         });
     }
