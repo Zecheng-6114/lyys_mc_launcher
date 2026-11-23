@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
 use crate::core::config::{self, ConfigError, InstanceConfig, LauncherConfig};
+use crate::core::i18n::{self, t, tf};
 use crate::core::install;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
 use crate::core::modrinth::{self, ModrinthError, ModSearchRequest};
@@ -205,6 +206,11 @@ impl From<ContentType> for modrinth::ProjectType {
 }
 
 pub async fn run() -> Result<(), CliError> {
+    let language = LauncherConfig::load()
+        .ok()
+        .and_then(|config| i18n::Language::from_code(&config.language))
+        .unwrap_or_else(i18n::Language::detect);
+    i18n::set_language(language);
     match Cli::parse().command {
         Some(Command::Account(args)) => run_account(args.action).await,
         Some(Command::Install(args)) => run_install(args).await,
@@ -223,32 +229,45 @@ async fn run_account(action: AccountAction) -> Result<(), CliError> {
             let session = auth
                 .login(|prompt| {
                     println!(
-                        "open {} in a browser and enter code {}",
-                        prompt.verification_uri, prompt.user_code
+                        "{}",
+                        tf(
+                            "open {} in a browser and enter code {}",
+                            &[prompt.verification_uri.as_str(), prompt.user_code.as_str()],
+                        )
                     );
-                    println!("the code is valid for {} minutes", prompt.expires_in / 60);
+                    let minutes = (prompt.expires_in / 60).to_string();
+                    println!(
+                        "{}",
+                        tf("the code is valid for {} minutes", &[minutes.as_str()])
+                    );
                 })
                 .await?;
             println!(
-                "logged in: {} ({})",
-                session.profile.name, session.profile.id
+                "{}",
+                tf(
+                    "logged in: {} ({})",
+                    &[session.profile.name.as_str(), session.profile.id.as_str()],
+                )
             );
         }
         AccountAction::List => print_accounts(&auth)?,
         AccountAction::Offline { name } => {
             let session = auth.add_offline(&name)?;
             println!(
-                "offline account added: {} ({})",
-                session.profile.name, session.profile.id
+                "{}",
+                tf(
+                    "offline account added: {} ({})",
+                    &[session.profile.name.as_str(), session.profile.id.as_str()],
+                )
             );
         }
         AccountAction::Use { uuid } => {
             auth.set_active(&uuid)?;
-            println!("active account set to {uuid}");
+            println!("{}", tf("active account set to {}", &[uuid.as_str()]));
         }
         AccountAction::Remove { uuid } => {
             auth.remove(&uuid)?;
-            println!("account removed: {uuid}");
+            println!("{}", tf("account removed: {}", &[uuid.as_str()]));
         }
         AccountAction::Current => {
             let session = auth.refresh_current().await?;
@@ -279,9 +298,14 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
             let mut printed = false;
             let mut reporter = |progress: install::InstallProgress| {
                 printed = true;
+                let downloaded = progress.downloaded.to_string();
+                let skipped = progress.skipped.to_string();
                 print!(
-                    "\rdownloaded {} files, skipped {}",
-                    progress.downloaded, progress.skipped
+                    "\r{}",
+                    tf(
+                        "downloaded {} files, skipped {}",
+                        &[downloaded.as_str(), skipped.as_str()],
+                    )
                 );
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             };
@@ -301,7 +325,14 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
     })
     .await
     .map_err(|error| CliError::Task(error.to_string()))??;
-    println!("installed {} into {}", version_id, minecraft_dir.display());
+    let directory = minecraft_dir.display().to_string();
+    println!(
+        "{}",
+        tf(
+            "installed {} into {}",
+            &[version_id.as_str(), directory.as_str()],
+        )
+    );
     Ok(())
 }
 
@@ -351,7 +382,10 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
         game_dir: args.game_dir.as_deref(),
         isolated: isolate,
     })?;
-    println!("launched {}, pid {}", args.version, child.id());
+    println!(
+        "{}",
+        tf("launched {}, pid {}", &[args.version.as_str(), child.id().to_string().as_str()])
+    );
     // 子进程继承终端输出，不等到它退出就交还 shell 会把游戏日志和提示符搅在一起
     let status = child.wait().map_err(AuthError::from)?;
     if !status.success() {
@@ -376,11 +410,15 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
     })
     .await?;
     if result.hits.is_empty() {
-        println!("no content found");
+        println!("{}", t("no content found"));
         return Ok(());
     }
     for hit in &result.hits {
-        println!("{}  ·  {} downloads", hit.title, hit.downloads);
+        let downloads = hit.downloads.to_string();
+        println!(
+            "{}",
+            tf("{}  ·  {} downloads", &[hit.title.as_str(), downloads.as_str()])
+        );
         println!(
             "  https://modrinth.com/{}/{}",
             kind.url_segment(),
@@ -388,7 +426,12 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
         );
     }
     println!();
-    println!("{} results, showing {}", result.total_hits, result.hits.len());
+    let total_hits = result.total_hits.to_string();
+    let shown = result.hits.len().to_string();
+    println!(
+        "{}",
+        tf("{} results, showing {}", &[total_hits.as_str(), shown.as_str()])
+    );
     Ok(())
 }
 
@@ -396,12 +439,14 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
     let kind = modrinth::ProjectType::from(args.kind);
     let game_version = args.minecraft.trim();
     if game_version.is_empty() {
-        return Err(CliError::Usage("--minecraft must not be empty".to_owned()));
+        return Err(CliError::Usage(
+            t("--minecraft must not be empty").to_owned(),
+        ));
     }
     let loader = args.loader.as_deref().map(str::trim).unwrap_or("");
     if kind == modrinth::ProjectType::Mod && loader.is_empty() {
         return Err(CliError::Usage(
-            "mods need --loader fabric, quilt, forge or neoforge".to_owned(),
+            t("mods need --loader fabric, quilt, forge or neoforge").to_owned(),
         ));
     }
 
@@ -426,7 +471,7 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
                     let world = args.world.as_deref().map(str::trim).unwrap_or("");
                     if world.is_empty() {
                         return Err(CliError::Usage(
-                            "data packs need --world <save name>".to_owned(),
+                            t("data packs need --world <save name>").to_owned(),
                         ));
                     }
                     game_dir.join("saves").join(world).join("datapacks")
@@ -442,11 +487,22 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
         _ => modrinth::install_content(&args.project, game_version, &target).await?,
     };
     for installed in &outcome.installed {
-        println!("installed {} ({})", installed.filename, installed.version_number);
+        println!(
+            "{}",
+            tf(
+                "installed {} ({})",
+                &[
+                    installed.filename.as_str(),
+                    installed.version_number.as_str()
+                ],
+            )
+        );
     }
-    println!("saved to {}", target.display());
+    let directory = target.display().to_string();
+    println!("{}", tf("saved to {}", &[directory.as_str()]));
     if !outcome.skipped.is_empty() {
-        println!("missing dependencies: {}", outcome.skipped.join(", "));
+        let skipped = outcome.skipped.join(", ");
+        println!("{}", tf("missing dependencies: {}", &[skipped.as_str()]));
     }
     Ok(())
 }
@@ -456,34 +512,41 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
     match action {
         ConfigAction::Show => {
             let path = config::path()?;
-            println!("config file: {}", path.display());
+            let path = path.display().to_string();
+            println!("{}", tf("config file: {}", &[path.as_str()]));
             let dir = if config.minecraft_dir.trim().is_empty() {
-                "(default .minecraft)"
+                t("(default .minecraft)")
             } else {
                 config.minecraft_dir.trim()
             };
             let java = if config.java_path.trim().is_empty() {
-                "(auto-detect)"
+                t("(auto-detect)")
             } else {
                 config.java_path.trim()
             };
-            println!("minecraft dir: {dir}");
-            println!("java path: {java}");
-            println!("version isolation: {}", yes_no(config.isolate));
+            println!("{}", tf("minecraft dir: {}", &[dir]));
+            println!("{}", tf("java path: {}", &[java]));
+            println!("{}", tf("version isolation: {}", &[yes_no(config.isolate)]));
             if config.instances.is_empty() {
-                println!("instance overrides: none");
+                println!("{}", t("instance overrides: none"));
             } else {
-                println!("instance overrides:");
+                println!("{}", t("instance overrides:"));
                 for (id, entry) in &config.instances {
                     if entry.use_global {
-                        println!("  {id}: uses global configuration");
+                        println!("{}", tf("  {}: uses global configuration", &[id.as_str()]));
                     } else {
                         let java = if entry.java_path.trim().is_empty() {
-                            "(global)".to_owned()
+                            t("(global)").to_owned()
                         } else {
                             entry.java_path.trim().to_owned()
                         };
-                        println!("  {id}: isolate={}, java={java}", yes_no(entry.isolate));
+                        println!(
+                            "{}",
+                            tf(
+                                "  {}: isolate={}, java={}",
+                                &[id.as_str(), yes_no(entry.isolate), java.as_str()],
+                            )
+                        );
                     }
                 }
             }
@@ -506,7 +569,8 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 config.isolate = false;
             }
             let path = config.save()?;
-            println!("configuration saved to {}", path.display());
+            let path = path.display().to_string();
+            println!("{}", tf("configuration saved to {}", &[path.as_str()]));
         }
         ConfigAction::Instance {
             version,
@@ -526,7 +590,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             } else {
                 if !isolate && !no_isolate && java.is_none() {
                     return Err(CliError::Usage(
-                        "pass --global, --isolate, --no-isolate or --java to configure an instance"
+                        t("pass --global, --isolate, --no-isolate or --java to configure an instance")
                             .to_owned(),
                     ));
                 }
@@ -542,7 +606,14 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 }
             }
             let path = config.save()?;
-            println!("instance {version} saved to {}", path.display());
+            let path = path.display().to_string();
+            println!(
+                "{}",
+                tf(
+                    "instance {} saved to {}",
+                    &[version.as_str(), path.as_str()],
+                )
+            );
         }
     }
     Ok(())
@@ -554,7 +625,7 @@ fn configured_java(value: &str) -> Option<PathBuf> {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "on" } else { "off" }
+    if value { t("on") } else { t("off") }
 }
 
 fn resolve_minecraft_dir(
@@ -574,7 +645,7 @@ fn resolve_minecraft_dir(
 fn print_accounts(auth: &Auth) -> Result<(), AuthError> {
     let accounts = auth.list()?;
     if accounts.is_empty() {
-        println!("no accounts yet, run account login to add one");
+        println!("{}", t("no accounts yet, run account login to add one"));
         return Ok(());
     }
     let active = auth.active_uuid()?;
@@ -591,9 +662,9 @@ fn print_accounts(auth: &Auth) -> Result<(), AuthError> {
 
 fn account_line(marker: &str, account: &AccountSession) -> String {
     let state = match account.state {
-        SessionState::Valid => "valid",
-        SessionState::NeedsRelogin => "needs relogin",
-        SessionState::Offline => "offline",
+        SessionState::Valid => t("valid"),
+        SessionState::NeedsRelogin => t("needs relogin"),
+        SessionState::Offline => t("offline"),
     };
     format!(
         "{marker} {}  {}  {state}",

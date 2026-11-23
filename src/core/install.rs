@@ -13,6 +13,8 @@ use mc_launcher_core::net::http;
 use mc_launcher_core::progress::ProgressEvent;
 use serde::Deserialize;
 
+use super::i18n::tf;
+
 const VERSION_MANIFEST_URL: &str =
     "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json";
 const REQUEST_TIMEOUT_SECONDS: u64 = 30;
@@ -116,7 +118,15 @@ pub fn install(
             _ => return,
         }
         shown = true;
-        print!("\rdownloaded {downloaded} files, skipped {skipped}");
+        let downloaded = downloaded.to_string();
+        let skipped = skipped.to_string();
+        print!(
+            "\r{}",
+            tf(
+                "downloaded {} files, skipped {}",
+                &[downloaded.as_str(), skipped.as_str()],
+            )
+        );
         let _ = std::io::stdout().flush();
     });
     if shown {

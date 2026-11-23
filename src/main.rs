@@ -4,12 +4,15 @@ mod gui;
 
 use std::process::ExitCode;
 
+use crate::core::i18n::tf;
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match cli::run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            let message = error.to_string();
+            eprintln!("{}", tf("error: {}", &[message.as_str()]));
             ExitCode::FAILURE
         }
     }

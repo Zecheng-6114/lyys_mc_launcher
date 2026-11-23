@@ -12,6 +12,7 @@ use mc_launcher_core::utils::get_java_executable;
 
 use crate::core::auth::{AccountSession, Auth, SessionState};
 use crate::core::config::{self, InstanceConfig, LauncherConfig};
+use crate::core::i18n::{self, Language, t, tf};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
 use crate::core::launch::{self, LaunchAccount, LaunchRequest};
 use crate::core::modrinth::{
@@ -314,13 +315,16 @@ struct App {
 impl App {
     fn new(auth: Auth, handle: Handle) -> Self {
         let (tx, rx) = mpsc::channel();
-        let (config, config_status) = match LauncherConfig::load() {
+        let (config, load_error) = match LauncherConfig::load() {
             Ok(config) => (config, None),
-            Err(error) => (
-                LauncherConfig::default(),
-                Some(format!("failed to load configuration: {error}")),
-            ),
+            Err(error) => (LauncherConfig::default(), Some(error)),
         };
+        let language = Language::from_code(&config.language).unwrap_or_else(Language::detect);
+        i18n::set_language(language);
+        let config_status = load_error.map(|error| {
+            let error = error.to_string();
+            tf("failed to load configuration: {}", &[error.as_str()])
+        });
         let minecraft_dir = if config.minecraft_dir.trim().is_empty() {
             DEFAULT_MINECRAFT_DIR.to_owned()
         } else {
@@ -398,7 +402,9 @@ impl App {
                 self.active = active;
             }
             (Err(error), _) | (_, Err(error)) => {
-                self.log.push(format!("failed to read accounts: {error}"));
+                let error = error.to_string();
+                self.log
+                    .push(tf("failed to read accounts: {}", &[error.as_str()]));
             }
         }
     }
@@ -585,12 +591,17 @@ impl App {
         self.config.minecraft_dir = self.minecraft_dir.trim().to_owned();
         self.config.java_path = self.java_path.trim().to_owned();
         self.config.isolate = self.isolate;
+        self.config.language = i18n::current().code().to_owned();
         match self.config.save() {
             Ok(path) => {
-                self.config_status = Some(format!("saved to {}", path.display()));
+                let path = path.display().to_string();
+                self.config_status = Some(tf("saved to {}", &[path.as_str()]));
                 self.scan_installed();
             }
-            Err(error) => self.config_status = Some(format!("save failed: {error}")),
+            Err(error) => {
+                let error = error.to_string();
+                self.config_status = Some(tf("save failed: {}", &[error.as_str()]));
+            }
         }
     }
 
@@ -688,15 +699,19 @@ impl App {
         match std::fs::remove_file(dir.join(&record.filename)) {
             Ok(()) => removed += 1,
             Err(error) => {
-                self.mod_error = Some(format!("failed to remove {}: {error}", record.filename))
+                self.mod_error = Some(tf(
+                    "failed to remove {}: {}",
+                    &[record.filename.as_str(), error.to_string().as_str()],
+                ))
             }
         }
         removed += self.remove_unused_dependencies(&record.dependencies, dir);
         self.save_installed_mods(dir, kind);
         if self.mod_error.is_none() {
-            self.mod_notice = Some(format!(
-                "uninstalled {}, removed {removed} file(s)",
-                record.filename
+            let removed = removed.to_string();
+            self.mod_notice = Some(tf(
+                "uninstalled {}, removed {} file(s)",
+                &[record.filename.as_str(), removed.as_str()],
             ));
         }
     }
@@ -735,13 +750,16 @@ impl App {
         match serde_json::to_string_pretty(&self.installed_mods) {
             Ok(text) => {
                 if let Err(error) = std::fs::write(dir.join(Self::manifest_file(kind)), text) {
+                    let error = error.to_string();
                     self.log
-                        .push(format!("failed to write content manifest: {error}"));
+                        .push(tf("failed to write content manifest: {}", &[error.as_str()]));
                 }
             }
-            Err(error) => self
-                .log
-                .push(format!("failed to encode content manifest: {error}")),
+            Err(error) => {
+                let error = error.to_string();
+                self.log
+                    .push(tf("failed to encode content manifest: {}", &[error.as_str()]));
+            }
         }
     }
 
@@ -754,15 +772,18 @@ impl App {
         self.handle.spawn(async move {
             let result = auth
                 .login(move |prompt| {
-                    let _ = prompt_tx.send(Message::Log(format!(
+                    let _ = prompt_tx.send(Message::Log(tf(
                         "open {} and enter code {}",
-                        prompt.verification_uri, prompt.user_code
+                        &[prompt.verification_uri.as_str(), prompt.user_code.as_str()],
                     )));
                 })
                 .await;
             let line = match result {
-                Ok(session) => format!("logged in: {}", session.profile.name),
-                Err(error) => format!("login failed: {error}"),
+                Ok(session) => tf("logged in: {}", &[session.profile.name.as_str()]),
+                Err(error) => {
+                    let error = error.to_string();
+                    tf("login failed: {}", &[error.as_str()])
+                }
             };
             let _ = tx.send(Message::Log(line));
             let _ = tx.send(Message::TaskDone(Task::Login));
@@ -773,7 +794,7 @@ impl App {
     fn start_install(&mut self, ctx: &egui::Context) {
         let version = self.install_version.trim().to_owned();
         if version.is_empty() {
-            self.log.push("enter a version first".to_owned());
+            self.log.push(t("enter a version first").to_owned());
             return;
         }
         self.installing = true;
@@ -808,14 +829,20 @@ impl App {
                         &mut reporter,
                     ) {
                         Ok(result) => {
-                            format!("installed {loader_name} {}", result.version_id)
+                            tf("installed {} {}", &[loader_name, result.version_id.as_str()])
                         }
-                        Err(error) => format!("install failed: {error}"),
+                        Err(error) => {
+                            let error = error.to_string();
+                            tf("install failed: {}", &[error.as_str()])
+                        }
                     }
                 }
                 None => match install::install_with_reporter(&dir, &version, &mut reporter) {
-                    Ok(_) => format!("installed {version}"),
-                    Err(error) => format!("install failed: {error}"),
+                    Ok(_) => tf("installed {}", &[version.as_str()]),
+                    Err(error) => {
+                        let error = error.to_string();
+                        tf("install failed: {}", &[error.as_str()])
+                    }
                 },
             };
             let _ = tx.send(Message::Log(line));
@@ -827,7 +854,8 @@ impl App {
     fn start_launch(&mut self, ctx: &egui::Context) {
         let version = self.launch_version.trim().to_owned();
         if version.is_empty() {
-            self.log.push("select an installed instance first".to_owned());
+            self.log
+                .push(t("select an installed instance first").to_owned());
             return;
         }
         self.launching = true;
@@ -840,8 +868,14 @@ impl App {
         self.handle.spawn(async move {
             let result = launch_task(&auth, &dir, &version, &java, isolate).await;
             let line = match result {
-                Ok(pid) => format!("launched {version}, pid {pid}"),
-                Err(error) => format!("launch failed: {error}"),
+                Ok(pid) => tf(
+                    "launched {}, pid {}",
+                    &[version.as_str(), pid.to_string().as_str()],
+                ),
+                Err(error) => {
+                    let error = error.to_string();
+                    tf("launch failed: {}", &[error.as_str()])
+                }
             };
             let _ = tx.send(Message::Log(line));
             let _ = tx.send(Message::TaskDone(Task::Launch));
@@ -911,20 +945,20 @@ impl App {
         ctx: &egui::Context,
     ) {
         if game_version.trim().is_empty() {
-            self.mod_error = Some("enter a Minecraft version first".to_owned());
+            self.mod_error = Some(t("enter a Minecraft version first").to_owned());
             return;
         }
         if kind == ProjectType::Mod && loader.as_deref().unwrap_or("").trim().is_empty() {
-            self.mod_error = Some("pick a loader before installing mods".to_owned());
+            self.mod_error = Some(t("pick a loader before installing mods").to_owned());
             return;
         }
         if kind == ProjectType::DataPack && self.mod_datapack_world.trim().is_empty() {
-            self.mod_error = Some("pick a world before installing data packs".to_owned());
+            self.mod_error = Some(t("pick a world before installing data packs").to_owned());
             return;
         }
         if self.mods_isolate() && self.mods_target_instance().is_none() {
             self.mod_error =
-                Some("version isolation is on, pick an instance to install into".to_owned());
+                Some(t("version isolation is on, pick an instance to install into").to_owned());
             return;
         }
         let target = self.content_dir(kind);
@@ -960,7 +994,7 @@ impl App {
     }
 
     fn install_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Install instance");
+        ui.heading(t("Install instance"));
         let loader_key = (self.install_loader, self.install_version.trim().to_owned());
         if self.install_loader != LoaderChoice::Vanilla
             && self.loader_versions_key.as_ref() != Some(&loader_key)
@@ -970,12 +1004,12 @@ impl App {
             self.reload_loader_versions(ui.ctx());
         }
         ui.horizontal(|ui| {
-            ui.label("Version:");
+            ui.label(t("Version:"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.install_version).id_salt("install_version"),
             );
             if ui
-                .add_enabled(!self.versions_loading, egui::Button::new("Refresh list"))
+                .add_enabled(!self.versions_loading, egui::Button::new(t("Refresh list")))
                 .clicked()
             {
                 self.reload_versions(ui.ctx());
@@ -984,13 +1018,13 @@ impl App {
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut self.show_all_versions,
-                "Show snapshots and old versions",
+                t("Show snapshots and old versions"),
             );
             if self.versions_loading {
                 ui.add(egui::widgets::Spinner::new().size(14.0));
-                ui.label("loading versions...");
+                ui.label(t("loading versions..."));
             } else if let Some(error) = &self.versions_error {
-                ui.label(format!("version list failed: {error}"));
+                ui.label(tf("version list failed: {}", &[error.as_str()]));
             }
         });
         if !self.versions.is_empty() {
@@ -1016,7 +1050,7 @@ impl App {
                 });
         }
         ui.horizontal(|ui| {
-            ui.label("Loader:");
+            ui.label(t("Loader:"));
             egui::ComboBox::from_id_salt("install_loader")
                 .selected_text(self.install_loader.label())
                 .show_ui(ui, |ui| {
@@ -1025,14 +1059,14 @@ impl App {
                     }
                 });
             if self.install_loader != LoaderChoice::Vanilla {
-                ui.label("Loader version:");
+                ui.label(t("Loader version:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.install_loader_version)
                         .id_salt("install_loader_version")
-                        .hint_text("latest"),
+                        .hint_text(t("latest")),
                 );
                 if ui
-                    .add_enabled(!self.loader_versions_loading, egui::Button::new("Refresh"))
+                    .add_enabled(!self.loader_versions_loading, egui::Button::new(t("Refresh")))
                     .clicked()
                 {
                     self.loader_versions_key = Some((
@@ -1048,11 +1082,11 @@ impl App {
         });
         if self.install_loader != LoaderChoice::Vanilla {
             if let Some(error) = &self.loader_versions_error {
-                ui.label(format!("loader list failed: {error}"));
+                ui.label(tf("loader list failed: {}", &[error.as_str()]));
             }
             if self.loader_versions.is_empty() {
                 if !self.loader_versions_loading && self.loader_versions_error.is_none() {
-                    ui.label("no compatible loader version found");
+                    ui.label(t("no compatible loader version found"));
                 }
             } else {
                 egui::ScrollArea::vertical()
@@ -1077,22 +1111,22 @@ impl App {
                 LoaderChoice::Forge | LoaderChoice::NeoForge
             ) {
                 ui.horizontal(|ui| {
-                    ui.label("Java:");
+                    ui.label(t("Java:"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.java_path).id_salt("install_java"),
                     );
-                    ui.label("used by the loader installer");
+                    ui.label(t("used by the loader installer"));
                 });
             }
         }
         ui.horizontal(|ui| {
-            ui.label("Minecraft dir:");
+            ui.label(t("Minecraft dir:"));
             ui.add(egui::TextEdit::singleline(&mut self.minecraft_dir).id_salt("install_dir"));
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!self.installing, egui::Button::new("Install"))
+                .add_enabled(!self.installing, egui::Button::new(t("Install")))
                 .clicked()
             {
                 self.start_install(ui.ctx());
@@ -1103,32 +1137,34 @@ impl App {
         });
         if let Some(progress) = &self.install_progress {
             ui.add_space(6.0);
-            ui.monospace(format!(
+            let downloaded = progress.downloaded.to_string();
+            let skipped = progress.skipped.to_string();
+            ui.monospace(tf(
                 "files downloaded: {} · skipped: {}",
-                progress.downloaded, progress.skipped
+                &[downloaded.as_str(), skipped.as_str()],
             ));
             if let Some(current) = &progress.current {
-                ui.monospace(format!("current: {current}"));
+                ui.monospace(tf("current: {}", &[current.as_str()]));
             }
         }
     }
 
     fn launch_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Launch instance");
+        ui.heading(t("Launch instance"));
         ui.horizontal(|ui| {
-            ui.label("Minecraft dir:");
+            ui.label(t("Minecraft dir:"));
             ui.add(egui::TextEdit::singleline(&mut self.minecraft_dir).id_salt("launch_dir"));
-            if ui.button("Scan installed").clicked() {
+            if ui.button(t("Scan installed")).clicked() {
                 self.scan_installed();
             }
         });
         if let Some(error) = &self.installed_error {
-            ui.label(format!("scan failed: {error}"));
+            ui.label(tf("scan failed: {}", &[error.as_str()]));
         }
         if self.installed.is_empty() {
-            ui.label("no installed instance found, install one first");
+            ui.label(t("no installed instance found, install one first"));
         } else {
-            ui.label("Installed instances:");
+            ui.label(t("Installed instances:"));
             egui::ScrollArea::vertical()
                 .id_salt("launch_instances")
                 .max_height(160.0)
@@ -1152,15 +1188,16 @@ impl App {
             let java = self.effective_java(&selected);
             let isolate = self.effective_isolate(&selected);
             let source = if self.instance_uses_global(&selected) {
-                "global"
+                t("global")
             } else {
-                "instance"
+                t("instance")
             };
+            let java = java.display().to_string();
+            let isolation = if isolate { t("on") } else { t("off") };
             ui.label(
-                egui::RichText::new(format!(
-                    "Java: {}  ·  version isolation: {}  ({source} config, edit in Settings)",
-                    java.display(),
-                    if isolate { "on" } else { "off" }
+                egui::RichText::new(tf(
+                    "Java: {}  ·  version isolation: {}  ({} config, edit in Settings)",
+                    &[java.as_str(), isolation, source],
                 ))
                 .weak()
                 .small(),
@@ -1171,7 +1208,7 @@ impl App {
             if ui
                 .add_enabled(
                     !self.launching && !self.launch_version.trim().is_empty(),
-                    egui::Button::new("Launch"),
+                    egui::Button::new(t("Launch")),
                 )
                 .clicked()
             {
@@ -1184,11 +1221,11 @@ impl App {
     }
 
     fn mods_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Search content");
-        ui.label(egui::RichText::new("Powered by Modrinth").weak());
+        ui.heading(t("Search content"));
+        ui.label(egui::RichText::new(t("Powered by Modrinth")).weak());
         let can_switch_type = self.mod_installing.is_none();
         ui.horizontal(|ui| {
-            ui.label("Type:");
+            ui.label(t("Type:"));
             ui.add_enabled_ui(can_switch_type, |ui| {
                 for kind in [
                     ProjectType::Mod,
@@ -1212,17 +1249,17 @@ impl App {
             });
         });
         ui.horizontal(|ui| {
-            ui.label("Query:");
+            ui.label(t("Query:"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.mod_query)
                     .id_salt("mod_query")
-                    .hint_text("e.g. sodium")
+                    .hint_text(t("e.g. sodium"))
                     .desired_width(220.0),
             );
             let submitted =
                 response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if ui
-                .add_enabled(!self.mod_searching, egui::Button::new("Search"))
+                .add_enabled(!self.mod_searching, egui::Button::new(t("Search")))
                 .clicked()
                 || submitted
             {
@@ -1233,19 +1270,19 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Minecraft:");
+            ui.label(t("Minecraft:"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.mod_minecraft_version)
                     .id_salt("mod_minecraft_version")
-                    .hint_text("any")
+                    .hint_text(t("any"))
                     .desired_width(100.0),
             );
             if self.mod_kind == ProjectType::Mod {
-                ui.label("Loader:");
+                ui.label(t("Loader:"));
                 egui::ComboBox::from_id_salt("mod_loader")
-                    .selected_text(self.mod_loader.map(loader_label).unwrap_or("Any"))
+                    .selected_text(self.mod_loader.map(loader_label).unwrap_or(t("Any")))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.mod_loader, None, "Any");
+                        ui.selectable_value(&mut self.mod_loader, None, t("Any"));
                         for kind in [
                             LoaderKind::Fabric,
                             LoaderKind::Quilt,
@@ -1261,9 +1298,9 @@ impl App {
                     });
             }
             if self.mod_kind == ProjectType::DataPack {
-                ui.label("World:");
+                ui.label(t("World:"));
                 let selected = if self.mod_datapack_world.is_empty() {
-                    "pick…".to_owned()
+                    t("pick…").to_owned()
                 } else {
                     self.mod_datapack_world.clone()
                 };
@@ -1271,7 +1308,7 @@ impl App {
                     .selected_text(selected)
                     .show_ui(ui, |ui| {
                         if self.datapack_worlds.is_empty() {
-                            ui.label("no world found");
+                            ui.label(t("no world found"));
                         }
                         for world in &self.datapack_worlds {
                             ui.selectable_value(&mut self.mod_datapack_world, world.clone(), world);
@@ -1279,10 +1316,10 @@ impl App {
                     });
             }
             if !self.installed.is_empty() {
-                ui.label("From instance:");
+                ui.label(t("From instance:"));
                 let mut picked: Option<(String, Option<String>, Option<&'static str>)> = None;
                 egui::ComboBox::from_id_salt("mod_instance")
-                    .selected_text(self.mod_instance_id.as_deref().unwrap_or("pick…"))
+                    .selected_text(self.mod_instance_id.as_deref().unwrap_or(t("pick…")))
                     .show_ui(ui, |ui| {
                         for instance in &self.installed {
                             let label = match (instance.loader, &instance.game_version) {
@@ -1322,7 +1359,7 @@ impl App {
             }
         });
         if let Some(error) = &self.mod_error {
-            ui.label(format!("error: {error}"));
+            ui.label(tf("error: {}", &[error.as_str()]));
         }
         if let Some(notice) = &self.mod_notice {
             ui.label(notice);
@@ -1340,27 +1377,32 @@ impl App {
             self.load_installed_mods(&target_dir, self.mod_kind);
             self.start_update_check(ui.ctx(), &target_dir, self.mod_kind);
         }
-        let isolated_suffix = if self.mods_isolate() { " (isolated)" } else { "" };
+        let isolated_suffix = if self.mods_isolate() {
+            t(" (isolated)")
+        } else {
+            ""
+        };
+        let target = target_dir.display().to_string();
         ui.label(
-            egui::RichText::new(format!(
-                "target: {}{isolated_suffix}",
-                target_dir.display()
-            ))
-            .weak()
-            .small(),
+            egui::RichText::new(tf("target: {}{}", &[target.as_str(), isolated_suffix]))
+                .weak()
+                .small(),
         );
         if self.mod_results.is_empty() {
             if !self.mod_searching && self.mod_error.is_none() {
-                ui.label("enter a query, optionally filter by Minecraft version and loader");
+                ui.label(t(
+                    "enter a query, optionally filter by Minecraft version and loader",
+                ));
             }
         } else {
             ui.horizontal(|ui| {
-                ui.label(format!(
+                let total = self.mod_total.to_string();
+                let shown = self.mod_results.len().to_string();
+                ui.label(tf(
                     "{} results (showing {})",
-                    self.mod_total,
-                    self.mod_results.len()
+                    &[total.as_str(), shown.as_str()],
                 ));
-                if ui.small_button("Reload icons").clicked() {
+                if ui.small_button(t("Reload icons")).clicked() {
                     ui.ctx().forget_all_images();
                 }
             });
@@ -1374,23 +1416,23 @@ impl App {
                 && (!needs_loader || self.mod_loader.is_some());
             if !target_ready {
                 ui.label(
-                    egui::RichText::new(
+                    egui::RichText::new(t(
                         "version isolation is on: pick an instance to install content into",
-                    )
+                    ))
                     .weak()
                     .small(),
                 );
             } else if !world_ready {
                 ui.label(
-                    egui::RichText::new("pick a world to install data packs into")
+                    egui::RichText::new(t("pick a world to install data packs into"))
                         .weak()
                         .small(),
                 );
             } else if !filters_ready {
                 let hint = if needs_loader {
-                    "set a Minecraft version and loader to install mods"
+                    t("set a Minecraft version and loader to install mods")
                 } else {
-                    "set a Minecraft version to install content"
+                    t("set a Minecraft version to install content")
                 };
                 ui.label(egui::RichText::new(hint).weak().small());
             }
@@ -1502,17 +1544,19 @@ impl App {
                 if ui
                     .add_enabled(
                         self.mod_page > 1 && !self.mod_searching,
-                        egui::Button::new("Previous"),
+                        egui::Button::new(t("Previous")),
                     )
                     .clicked()
                 {
                     self.goto_mod_page(self.mod_page - 1, ui.ctx());
                 }
-                ui.label(format!("Page {} / {}", self.mod_page, total_pages));
+                let page = self.mod_page.to_string();
+                let pages = total_pages.to_string();
+                ui.label(tf("Page {} / {}", &[page.as_str(), pages.as_str()]));
                 if ui
                     .add_enabled(
                         self.mod_page < total_pages && !self.mod_searching,
-                        egui::Button::new("Next"),
+                        egui::Button::new(t("Next")),
                     )
                     .clicked()
                 {
@@ -1523,12 +1567,12 @@ impl App {
     }
 
     fn settings_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
+        ui.heading(t("Settings"));
         let path = config::path()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "unavailable".to_owned());
+            .unwrap_or_else(|_| t("unavailable").to_owned());
         ui.label(
-            egui::RichText::new(format!("stored in {path}"))
+            egui::RichText::new(tf("stored in {}", &[path.as_str()]))
                 .weak()
                 .small(),
         );
@@ -1536,31 +1580,47 @@ impl App {
             .id_salt("settings")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(t("Language:"));
+                    let mut language = i18n::current();
+                    egui::ComboBox::from_id_salt("settings_language")
+                        .selected_text(language.label())
+                        .show_ui(ui, |ui| {
+                            for choice in Language::ALL {
+                                ui.selectable_value(&mut language, choice, choice.label());
+                            }
+                        });
+                    if language != i18n::current() {
+                        i18n::set_language(language);
+                        self.save_config();
+                    }
+                });
+                ui.add_space(10.0);
                 ui.group(|ui| {
-                    ui.label(egui::RichText::new("Global configuration").strong());
+                    ui.label(egui::RichText::new(t("Global configuration")).strong());
                     ui.horizontal(|ui| {
-                        ui.label("Minecraft dir:");
+                        ui.label(t("Minecraft dir:"));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.minecraft_dir)
                                 .id_salt("settings_minecraft_dir"),
                         );
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Java path:");
+                        ui.label(t("Java path:"));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.java_path)
                                 .id_salt("settings_java")
-                                .hint_text("auto-detect"),
+                                .hint_text(t("auto-detect")),
                         );
                     });
-                    ui.checkbox(&mut self.isolate, "Version isolation");
+                    ui.checkbox(&mut self.isolate, t("Version isolation"));
                 });
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new("Instances").strong());
+                ui.label(egui::RichText::new(t("Instances")).strong());
                 ui.label(
-                    egui::RichText::new(
+                    egui::RichText::new(t(
                         "Each instance uses the global configuration unless overridden below",
-                    )
+                    ))
                     .weak()
                     .small(),
                 );
@@ -1571,7 +1631,7 @@ impl App {
                     .collect();
                 if ids.is_empty() {
                     ui.label(
-                        egui::RichText::new("no installed instance found")
+                        egui::RichText::new(t("no installed instance found"))
                             .weak()
                             .small(),
                     );
@@ -1582,7 +1642,10 @@ impl App {
                     let mut toggled = false;
                     ui.group(|ui| {
                         if ui
-                            .checkbox(&mut use_global, format!("{id}: use global configuration"))
+                            .checkbox(
+                                &mut use_global,
+                                tf("{}: use global configuration", &[id.as_str()]),
+                            )
                             .changed()
                         {
                             toggled = true;
@@ -1598,13 +1661,13 @@ impl App {
                                 java_path: String::new(),
                             }
                         });
-                        ui.checkbox(&mut entry.isolate, "Version isolation");
+                        ui.checkbox(&mut entry.isolate, t("Version isolation"));
                         ui.horizontal(|ui| {
-                            ui.label("Java path:");
+                            ui.label(t("Java path:"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut entry.java_path)
                                     .id_salt(("instance_java", id.as_str()))
-                                    .hint_text("inherit global"),
+                                    .hint_text(t("inherit global")),
                             );
                         });
                     });
@@ -1625,7 +1688,7 @@ impl App {
                     }
                 }
                 ui.add_space(10.0);
-                if ui.button("Save configuration").clicked() {
+                if ui.button(t("Save configuration")).clicked() {
                     self.save_config();
                 }
                 if let Some(status) = &self.config_status {
@@ -1658,7 +1721,10 @@ fn mod_result(
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(&hit.title).strong());
-                    ui.label(egui::RichText::new(format!("{} downloads", hit.downloads)).weak());
+                    let downloads = hit.downloads.to_string();
+                    ui.label(
+                        egui::RichText::new(tf("{} downloads", &[downloads.as_str()])).weak(),
+                    );
                 });
                 if !hit.description.is_empty() {
                     ui.label(&hit.description);
@@ -1682,9 +1748,9 @@ fn mod_result(
                 }
                 if let Some(version) = installed_version {
                     let label = if version.is_empty() {
-                        "installed".to_owned()
+                        t("installed").to_owned()
                     } else {
-                        format!("installed v{version}")
+                        tf("installed v{}", &[version])
                     };
                     ui.label(egui::RichText::new(label).weak().small());
                 }
@@ -1694,7 +1760,7 @@ fn mod_result(
                     }
                     if installed {
                         if ui
-                            .add_enabled(actions_enabled && target_ready, egui::Button::new("Uninstall"))
+                            .add_enabled(actions_enabled && target_ready, egui::Button::new(t("Uninstall")))
                             .clicked()
                         {
                             action = Some(ModAction::Uninstall);
@@ -1702,7 +1768,7 @@ fn mod_result(
                         if ui
                             .add_enabled(
                                 actions_enabled && target_ready,
-                                egui::Button::new("Reinstall"),
+                                egui::Button::new(t("Reinstall")),
                             )
                             .clicked()
                         {
@@ -1712,7 +1778,7 @@ fn mod_result(
                             if ui
                                 .add_enabled(
                                     actions_enabled && target_ready,
-                                    egui::Button::new(format!("Update to {number}")),
+                                    egui::Button::new(tf("Update to {}", &[number])),
                                 )
                                 .clicked()
                             {
@@ -1722,14 +1788,14 @@ fn mod_result(
                     } else if ui
                         .add_enabled(
                             actions_enabled && target_ready && filters_ready,
-                            egui::Button::new("Install"),
+                            egui::Button::new(t("Install")),
                         )
                         .clicked()
                     {
                         action = Some(ModAction::Install);
                     }
                     ui.hyperlink_to(
-                        "Open on Modrinth",
+                        t("Open on Modrinth"),
                         format!(
                             "https://modrinth.com/{}/{}",
                             kind.url_segment(),
@@ -1746,10 +1812,10 @@ fn mod_result(
 
 fn content_label(kind: ProjectType) -> &'static str {
     match kind {
-        ProjectType::Mod => "Mods",
-        ProjectType::ResourcePack => "Resource packs",
-        ProjectType::ShaderPack => "Shader packs",
-        ProjectType::DataPack => "Data packs",
+        ProjectType::Mod => t("Mods"),
+        ProjectType::ResourcePack => t("Resource packs"),
+        ProjectType::ShaderPack => t("Shader packs"),
+        ProjectType::DataPack => t("Data packs"),
     }
 }
 
@@ -1998,17 +2064,23 @@ impl eframe::App for App {
                             let root_name = outcome
                                 .root()
                                 .map(|installed| installed.filename.as_str())
-                                .unwrap_or("content");
+                                .unwrap_or_else(|| t("content"));
                             let dependencies = outcome.installed.len().saturating_sub(1);
+                            let directory = dir.display().to_string();
                             let mut notice =
-                                format!("installed {root_name} into {}", dir.display());
+                                tf("installed {} into {}", &[root_name, directory.as_str()]);
                             if dependencies > 0 {
-                                notice.push_str(&format!(" (+{dependencies} dependencies)"));
+                                let dependencies = dependencies.to_string();
+                                notice.push_str(&tf(
+                                    " (+{} dependencies)",
+                                    &[dependencies.as_str()],
+                                ));
                             }
                             if !outcome.skipped.is_empty() {
-                                notice.push_str(&format!(
+                                let skipped = outcome.skipped.join(", ");
+                                notice.push_str(&tf(
                                     "; missing dependencies: {}",
-                                    outcome.skipped.join(", ")
+                                    &[skipped.as_str()],
                                 ));
                             }
                             self.mod_notice = Some(notice);
@@ -2043,7 +2115,7 @@ impl eframe::App for App {
 
         egui::Panel::top("accounts").show(ui, |ui| {
             ui.add_space(6.0);
-            ui.heading("Accounts");
+            ui.heading(t("Accounts"));
             for index in 0..self.accounts.len() {
                 let uuid = self.accounts[index].profile.id.clone();
                 let name = self.accounts[index].profile.name.clone();
@@ -2053,17 +2125,28 @@ impl eframe::App for App {
                     if ui.selectable_label(is_active, name).clicked() {
                         match self.auth.set_active(&uuid) {
                             Ok(()) => self.active = Some(uuid.clone()),
-                            Err(error) => self
-                                .log
-                                .push(format!("failed to set active account: {error}")),
+                            Err(error) => {
+                                let error = error.to_string();
+                                self.log.push(tf(
+                                    "failed to set active account: {}",
+                                    &[error.as_str()],
+                                ));
+                            }
                         }
                     }
-                    ui.label(format!("{state:?}"));
-                    if ui.small_button("Remove").clicked() {
+                    let state = match state {
+                        SessionState::Valid => t("valid"),
+                        SessionState::NeedsRelogin => t("needs relogin"),
+                        SessionState::Offline => t("offline"),
+                    };
+                    ui.label(state);
+                    if ui.small_button(t("Remove")).clicked() {
                         match self.auth.remove(&uuid) {
                             Ok(()) => self.reload_accounts(),
                             Err(error) => {
-                                self.log.push(format!("failed to remove account: {error}"))
+                                let error = error.to_string();
+                                self.log
+                                    .push(tf("failed to remove account: {}", &[error.as_str()]))
                             }
                         }
                     }
@@ -2071,10 +2154,10 @@ impl eframe::App for App {
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label("Offline name:");
+                ui.label(t("Offline name:"));
                 ui.text_edit_singleline(&mut self.offline_name);
                 if ui
-                    .add_enabled(!self.logging_in, egui::Button::new("Add offline"))
+                    .add_enabled(!self.logging_in, egui::Button::new(t("Add offline")))
                     .clicked()
                 {
                     let name = self.offline_name.trim().to_owned();
@@ -2083,11 +2166,18 @@ impl eframe::App for App {
                             self.offline_name.clear();
                             self.reload_accounts();
                         }
-                        Err(error) => self.log.push(format!("failed to add account: {error}")),
+                        Err(error) => {
+                            let error = error.to_string();
+                            self.log
+                                .push(tf("failed to add account: {}", &[error.as_str()]));
+                        }
                     }
                 }
                 if ui
-                    .add_enabled(!self.logging_in, egui::Button::new("Login with Microsoft"))
+                    .add_enabled(
+                        !self.logging_in,
+                        egui::Button::new(t("Login with Microsoft")),
+                    )
                     .clicked()
                 {
                     self.start_login(&ctx);
@@ -2113,10 +2203,10 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             paint_contour_background(ui.painter(), ui.max_rect(), ui.visuals());
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.page, Page::Install, "Install instance");
-                ui.selectable_value(&mut self.page, Page::Launch, "Launch instance");
-                ui.selectable_value(&mut self.page, Page::Mods, "Content");
-                ui.selectable_value(&mut self.page, Page::Settings, "Settings");
+                ui.selectable_value(&mut self.page, Page::Install, t("Install instance"));
+                ui.selectable_value(&mut self.page, Page::Launch, t("Launch instance"));
+                ui.selectable_value(&mut self.page, Page::Mods, t("Content"));
+                ui.selectable_value(&mut self.page, Page::Settings, t("Settings"));
             });
             ui.separator();
             match self.page {

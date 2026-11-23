@@ -51,6 +51,9 @@ pub struct LauncherConfig {
     pub java_path: String,
     #[serde(default)]
     pub isolate: bool,
+    /// Language code (`en_us`, `zh_cn`, `zh_tw`, `ja_jp`); empty means auto-detect.
+    #[serde(default)]
+    pub language: String,
     #[serde(default)]
     pub instances: BTreeMap<String, InstanceConfig>,
 }
