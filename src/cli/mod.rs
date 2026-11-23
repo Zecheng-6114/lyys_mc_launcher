@@ -6,6 +6,7 @@ use mc_launcher_core::utils::get_java_executable;
 use thiserror::Error;
 
 use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
+use crate::core::config::{self, ConfigError, InstanceConfig, LauncherConfig};
 use crate::core::install;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
 use crate::core::modrinth::{self, ModrinthError, ModSearchRequest};
@@ -22,6 +23,8 @@ pub enum CliError {
     #[error(transparent)]
     Modrinth(#[from] ModrinthError),
     #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
     Core(#[from] mc_launcher_core::LauncherError),
     #[error("the game exited with {0}")]
     Game(std::process::ExitStatus),
@@ -29,6 +32,8 @@ pub enum CliError {
     Task(String),
     #[error("unknown loader {0}, expected fabric, quilt, forge or neoforge")]
     UnknownLoader(String),
+    #[error("{0}")]
+    Usage(String),
     #[error("gui failed: {0}")]
     Gui(String),
 }
@@ -46,6 +51,7 @@ enum Command {
     Install(InstallArgs),
     Launch(LaunchArgs),
     Search(SearchArgs),
+    Config(ConfigArgs),
     Gui,
 }
 
@@ -76,7 +82,7 @@ struct InstallArgs {
     /// Exact loader version; defaults to the latest compatible one.
     #[arg(long, requires = "loader")]
     loader_version: Option<String>,
-    /// Java executable used by the Forge/NeoForge installer (defaults to the detected Java).
+    /// Java executable used by the Forge/NeoForge installer (defaults to the configured one).
     #[arg(long)]
     java: Option<PathBuf>,
 }
@@ -90,8 +96,50 @@ struct LaunchArgs {
     game_dir: Option<PathBuf>,
     #[arg(long)]
     java: Option<PathBuf>,
-    #[arg(long, conflicts_with = "game_dir")]
+    /// Override the configured version isolation for this launch.
+    #[arg(long, conflicts_with_all = ["game_dir", "no_isolate"])]
     isolate: bool,
+    /// Disable version isolation for this launch.
+    #[arg(long, conflicts_with = "game_dir")]
+    no_isolate: bool,
+}
+
+#[derive(Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    action: ConfigAction,
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print the configuration.
+    Show,
+    /// Update the global configuration.
+    Set {
+        #[arg(long)]
+        minecraft_dir: Option<PathBuf>,
+        #[arg(long)]
+        java: Option<PathBuf>,
+        /// Enable version isolation.
+        #[arg(long, conflicts_with = "no_isolate")]
+        isolate: bool,
+        /// Disable version isolation.
+        #[arg(long)]
+        no_isolate: bool,
+    },
+    /// Use the global configuration or override it for one instance.
+    Instance {
+        version: String,
+        /// Fall back to the global configuration.
+        #[arg(long, conflicts_with_all = ["isolate", "no_isolate", "java"])]
+        global: bool,
+        #[arg(long, conflicts_with = "no_isolate")]
+        isolate: bool,
+        #[arg(long)]
+        no_isolate: bool,
+        #[arg(long)]
+        java: Option<PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -113,6 +161,7 @@ pub async fn run() -> Result<(), CliError> {
         Some(Command::Install(args)) => run_install(args).await,
         Some(Command::Launch(args)) => run_launch(args).await,
         Some(Command::Search(args)) => run_search(args).await,
+        Some(Command::Config(args)) => run_config(args.action),
         Some(Command::Gui) | None => gui::run().map_err(CliError::Gui),
     }
 }
@@ -160,10 +209,12 @@ async fn run_account(action: AccountAction) -> Result<(), CliError> {
 }
 
 async fn run_install(args: InstallArgs) -> Result<(), CliError> {
-    let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir)?;
+    let config = LauncherConfig::load()?;
+    let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
     let version_id = args.version;
     let java = args
         .java
+        .or_else(|| configured_java(&config.java_path))
         .or_else(|| get_java_executable().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("java"));
     let loader = match args.loader {
@@ -219,7 +270,19 @@ fn parse_loader(name: &str, version: Option<String>) -> Result<LoaderSpec, CliEr
 }
 
 async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
-    let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir)?;
+    let config = LauncherConfig::load()?;
+    let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
+    let java = match args.java {
+        Some(java) => Some(java),
+        None => configured_java(config.effective_java(&args.version)),
+    };
+    let isolate = if args.isolate {
+        true
+    } else if args.no_isolate {
+        false
+    } else {
+        config.effective_isolate(&args.version)
+    };
 
     let auth = Auth::new()?;
     let session = auth.refresh_current().await?;
@@ -234,9 +297,9 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
         minecraft_dir: &minecraft_dir,
         version_id: &args.version,
         account,
-        java: args.java.as_deref(),
+        java: java.as_deref(),
         game_dir: args.game_dir.as_deref(),
-        isolated: args.isolate,
+        isolated: isolate,
     })?;
     println!("launched {}, pid {}", args.version, child.id());
     // 子进程继承终端输出，不等到它退出就交还 shell 会把游戏日志和提示符搅在一起
@@ -268,11 +331,124 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-fn resolve_minecraft_dir(dir: Option<PathBuf>) -> Result<PathBuf, AuthError> {
-    match dir {
-        Some(dir) => Ok(dir),
-        None => Ok(std::env::current_dir()?.join(DEFAULT_MINECRAFT_DIR)),
+fn run_config(action: ConfigAction) -> Result<(), CliError> {
+    let mut config = LauncherConfig::load()?;
+    match action {
+        ConfigAction::Show => {
+            let path = config::path()?;
+            println!("config file: {}", path.display());
+            let dir = if config.minecraft_dir.trim().is_empty() {
+                "(default .minecraft)"
+            } else {
+                config.minecraft_dir.trim()
+            };
+            let java = if config.java_path.trim().is_empty() {
+                "(auto-detect)"
+            } else {
+                config.java_path.trim()
+            };
+            println!("minecraft dir: {dir}");
+            println!("java path: {java}");
+            println!("version isolation: {}", yes_no(config.isolate));
+            if config.instances.is_empty() {
+                println!("instance overrides: none");
+            } else {
+                println!("instance overrides:");
+                for (id, entry) in &config.instances {
+                    if entry.use_global {
+                        println!("  {id}: uses global configuration");
+                    } else {
+                        let java = if entry.java_path.trim().is_empty() {
+                            "(global)".to_owned()
+                        } else {
+                            entry.java_path.trim().to_owned()
+                        };
+                        println!("  {id}: isolate={}, java={java}", yes_no(entry.isolate));
+                    }
+                }
+            }
+        }
+        ConfigAction::Set {
+            minecraft_dir,
+            java,
+            isolate,
+            no_isolate,
+        } => {
+            if let Some(dir) = minecraft_dir {
+                config.minecraft_dir = dir.display().to_string();
+            }
+            if let Some(java) = java {
+                config.java_path = java.display().to_string();
+            }
+            if isolate {
+                config.isolate = true;
+            } else if no_isolate {
+                config.isolate = false;
+            }
+            let path = config.save()?;
+            println!("configuration saved to {}", path.display());
+        }
+        ConfigAction::Instance {
+            version,
+            global,
+            isolate,
+            no_isolate,
+            java,
+        } => {
+            if global {
+                config.instances.insert(
+                    version.clone(),
+                    InstanceConfig {
+                        use_global: true,
+                        ..Default::default()
+                    },
+                );
+            } else {
+                if !isolate && !no_isolate && java.is_none() {
+                    return Err(CliError::Usage(
+                        "pass --global, --isolate, --no-isolate or --java to configure an instance"
+                            .to_owned(),
+                    ));
+                }
+                let entry = config.instances.entry(version.clone()).or_default();
+                entry.use_global = false;
+                if isolate {
+                    entry.isolate = true;
+                } else if no_isolate {
+                    entry.isolate = false;
+                }
+                if let Some(java) = java {
+                    entry.java_path = java.display().to_string();
+                }
+            }
+            let path = config.save()?;
+            println!("instance {version} saved to {}", path.display());
+        }
     }
+    Ok(())
+}
+
+fn configured_java(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
+fn resolve_minecraft_dir(
+    dir: Option<PathBuf>,
+    config: &LauncherConfig,
+) -> Result<PathBuf, AuthError> {
+    if let Some(dir) = dir {
+        return Ok(dir);
+    }
+    let configured = config.minecraft_dir.trim();
+    if !configured.is_empty() {
+        return Ok(PathBuf::from(configured));
+    }
+    Ok(std::env::current_dir()?.join(DEFAULT_MINECRAFT_DIR))
 }
 
 fn print_accounts(auth: &Auth) -> Result<(), AuthError> {

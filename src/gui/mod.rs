@@ -11,6 +11,7 @@ use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
 use mc_launcher_core::utils::get_java_executable;
 
 use crate::core::auth::{AccountSession, Auth, SessionState};
+use crate::core::config::{self, InstanceConfig, LauncherConfig};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
 use crate::core::launch::{self, LaunchAccount, LaunchRequest};
 use crate::core::modrinth::{
@@ -137,6 +138,7 @@ enum Page {
     Install,
     Launch,
     Mods,
+    Settings,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -275,12 +277,14 @@ struct App {
     installing: bool,
     // 启动实例
     launch_version: String,
-    launch_java: String,
     installed: Vec<InstalledInstance>,
     installed_dir: String,
     installed_error: Option<String>,
     launching: bool,
     isolate: bool,
+    // 持久化配置
+    config: LauncherConfig,
+    config_status: Option<String>,
     // 搜索模组
     mod_query: String,
     mod_minecraft_version: String,
@@ -304,6 +308,23 @@ struct App {
 impl App {
     fn new(auth: Auth, handle: Handle) -> Self {
         let (tx, rx) = mpsc::channel();
+        let (config, config_status) = match LauncherConfig::load() {
+            Ok(config) => (config, None),
+            Err(error) => (
+                LauncherConfig::default(),
+                Some(format!("failed to load configuration: {error}")),
+            ),
+        };
+        let minecraft_dir = if config.minecraft_dir.trim().is_empty() {
+            DEFAULT_MINECRAFT_DIR.to_owned()
+        } else {
+            config.minecraft_dir.trim().to_owned()
+        };
+        let java_path = if config.java_path.trim().is_empty() {
+            get_java_executable().unwrap_or_else(|| "java".to_owned())
+        } else {
+            config.java_path.trim().to_owned()
+        };
         let mut app = Self {
             auth: Arc::new(auth),
             handle,
@@ -314,14 +335,14 @@ impl App {
             offline_name: String::new(),
             page: Page::Install,
             install_version: String::new(),
-            minecraft_dir: DEFAULT_MINECRAFT_DIR.to_owned(),
+            minecraft_dir,
             install_loader: LoaderChoice::Vanilla,
             install_loader_version: String::new(),
             loader_versions: Vec::new(),
             loader_versions_loading: false,
             loader_versions_error: None,
             loader_versions_key: None,
-            java_path: get_java_executable().unwrap_or_else(|| "java".to_owned()),
+            java_path,
             versions: Vec::new(),
             versions_loading: false,
             versions_error: None,
@@ -330,12 +351,13 @@ impl App {
             install_progress: None,
             installing: false,
             launch_version: String::new(),
-            launch_java: get_java_executable().unwrap_or_else(|| "java".to_owned()),
             installed: Vec::new(),
             installed_dir: String::new(),
             installed_error: None,
             launching: false,
-            isolate: false,
+            isolate: config.isolate,
+            config,
+            config_status,
             mod_query: String::new(),
             mod_minecraft_version: String::new(),
             mod_loader: None,
@@ -452,12 +474,69 @@ impl App {
         })
     }
 
+    /// Whether `instance` falls back to the global configuration.
+    fn instance_uses_global(&self, instance: &str) -> bool {
+        self.config
+            .instances
+            .get(instance)
+            .map(|config| config.use_global)
+            .unwrap_or(true)
+    }
+
+    /// Version isolation for `instance`: its own config, else the global toggle.
+    fn effective_isolate(&self, instance: &str) -> bool {
+        match self.config.instances.get(instance) {
+            Some(config) if !config.use_global => config.isolate,
+            _ => self.isolate,
+        }
+    }
+
+    /// Java executable for `instance`: its own config, else the global one.
+    fn effective_java(&self, instance: &str) -> PathBuf {
+        let configured = match self.config.instances.get(instance) {
+            Some(config) if !config.use_global => config.java_path.trim(),
+            _ => "",
+        };
+        let path = if configured.is_empty() {
+            self.java_path.trim()
+        } else {
+            configured
+        };
+        if path.is_empty() {
+            PathBuf::from("java")
+        } else {
+            PathBuf::from(path)
+        }
+    }
+
+    /// Isolation that applies to the current mods target.
+    fn mods_isolate(&self) -> bool {
+        self.mods_target_instance()
+            .map_or(self.isolate, |instance| self.effective_isolate(instance))
+    }
+
     /// Version isolation runs the game from `versions/<id>`, so mods must live there too.
     fn mods_target_dir(&self) -> PathBuf {
         let base = PathBuf::from(self.minecraft_dir.trim());
         match self.mods_target_instance() {
-            Some(instance) if self.isolate => base.join("versions").join(instance).join("mods"),
+            Some(instance) if self.mods_isolate() => {
+                base.join("versions").join(instance).join("mods")
+            }
             _ => base.join("mods"),
+        }
+    }
+
+    /// Persist the configuration, syncing the runtime global values into it.
+    fn save_config(&mut self) {
+        self.config.minecraft_dir = self.minecraft_dir.trim().to_owned();
+        self.config.java_path = self.java_path.trim().to_owned();
+        self.config.isolate = self.isolate;
+        match self.config.save() {
+            Ok(path) => {
+                self.config_status = Some(format!("saved to {}", path.display()));
+                self.scan_installed();
+            }
+            Err(error) => self.config_status = Some(format!("save failed: {error}")),
         }
     }
 
@@ -693,12 +772,8 @@ impl App {
         }
         self.launching = true;
         let dir = PathBuf::from(self.minecraft_dir.trim());
-        let java = if self.launch_java.trim().is_empty() {
-            PathBuf::from("java")
-        } else {
-            PathBuf::from(self.launch_java.trim())
-        };
-        let isolate = self.isolate;
+        let java = self.effective_java(&version);
+        let isolate = self.effective_isolate(&version);
         let auth = Arc::clone(&self.auth);
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -772,7 +847,7 @@ impl App {
             self.mod_error = Some("enter a Minecraft version and loader first".to_owned());
             return;
         }
-        if self.isolate && self.mods_target_instance().is_none() {
+        if self.mods_isolate() && self.mods_target_instance().is_none() {
             self.mod_error =
                 Some("version isolation is on, pick an instance to install into".to_owned());
             return;
@@ -965,10 +1040,6 @@ impl App {
                 self.scan_installed();
             }
         });
-        ui.horizontal(|ui| {
-            ui.label("Java:");
-            ui.add(egui::TextEdit::singleline(&mut self.launch_java).id_salt("launch_java"));
-        });
         if let Some(error) = &self.installed_error {
             ui.label(format!("scan failed: {error}"));
         }
@@ -994,7 +1065,25 @@ impl App {
                     }
                 });
         }
-        ui.checkbox(&mut self.isolate, "Isolated game dir (versions/<version>)");
+        let selected = self.launch_version.trim().to_owned();
+        if !selected.is_empty() {
+            let java = self.effective_java(&selected);
+            let isolate = self.effective_isolate(&selected);
+            let source = if self.instance_uses_global(&selected) {
+                "global"
+            } else {
+                "instance"
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "Java: {}  ·  version isolation: {}  ({source} config, edit in Settings)",
+                    java.display(),
+                    if isolate { "on" } else { "off" }
+                ))
+                .weak()
+                .small(),
+            );
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui
@@ -1112,7 +1201,7 @@ impl App {
             self.load_installed_mods(&mods_dir);
             self.start_update_check(ui.ctx(), &mods_dir);
         }
-        let isolated_suffix = if self.isolate { " (isolated)" } else { "" };
+        let isolated_suffix = if self.mods_isolate() { " (isolated)" } else { "" };
         ui.label(
             egui::RichText::new(format!(
                 "mods target: {}{isolated_suffix}",
@@ -1136,7 +1225,7 @@ impl App {
                     ui.ctx().forget_all_images();
                 }
             });
-            let target_ready = !self.isolate || self.mods_target_instance().is_some();
+            let target_ready = !self.mods_isolate() || self.mods_target_instance().is_some();
             let filters_ready = target_ready
                 && !self.mod_minecraft_version.trim().is_empty()
                 && self.mod_loader.is_some();
@@ -1272,6 +1361,118 @@ impl App {
                 }
             });
         }
+    }
+
+    fn settings_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        let path = config::path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "unavailable".to_owned());
+        ui.label(
+            egui::RichText::new(format!("stored in {path}"))
+                .weak()
+                .small(),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt("settings")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Global configuration").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Minecraft dir:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.minecraft_dir)
+                                .id_salt("settings_minecraft_dir"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Java path:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.java_path)
+                                .id_salt("settings_java")
+                                .hint_text("auto-detect"),
+                        );
+                    });
+                    ui.checkbox(&mut self.isolate, "Version isolation");
+                });
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Instances").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Each instance uses the global configuration unless overridden below",
+                    )
+                    .weak()
+                    .small(),
+                );
+                let ids: Vec<String> = self
+                    .installed
+                    .iter()
+                    .map(|instance| instance.id.clone())
+                    .collect();
+                if ids.is_empty() {
+                    ui.label(
+                        egui::RichText::new("no installed instance found")
+                            .weak()
+                            .small(),
+                    );
+                }
+                let global_isolate = self.isolate;
+                for id in ids {
+                    let mut use_global = self.instance_uses_global(&id);
+                    let mut toggled = false;
+                    ui.group(|ui| {
+                        if ui
+                            .checkbox(&mut use_global, format!("{id}: use global configuration"))
+                            .changed()
+                        {
+                            toggled = true;
+                        }
+                        if use_global {
+                            return;
+                        }
+                        let entry = self.config.instances.entry(id.clone()).or_insert_with(|| {
+                            InstanceConfig {
+                                use_global: false,
+                                // 取消继承后从全局值起步，方便在此基础上修改
+                                isolate: global_isolate,
+                                java_path: String::new(),
+                            }
+                        });
+                        ui.checkbox(&mut entry.isolate, "Version isolation");
+                        ui.horizontal(|ui| {
+                            ui.label("Java path:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut entry.java_path)
+                                    .id_salt(("instance_java", id.as_str()))
+                                    .hint_text("inherit global"),
+                            );
+                        });
+                    });
+                    if toggled {
+                        let entry = self
+                            .config
+                            .instances
+                            .entry(id.clone())
+                            .or_insert_with(InstanceConfig::default);
+                        if use_global {
+                            entry.use_global = true;
+                        } else if entry.use_global {
+                            // 从全局配置切到单独配置时，以全局值作为起点
+                            entry.use_global = false;
+                            entry.isolate = global_isolate;
+                            entry.java_path.clear();
+                        }
+                    }
+                }
+                ui.add_space(10.0);
+                if ui.button("Save configuration").clicked() {
+                    self.save_config();
+                }
+                if let Some(status) = &self.config_status {
+                    ui.label(egui::RichText::new(status).weak().small());
+                }
+            });
     }
 }
 
@@ -1734,12 +1935,14 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.page, Page::Install, "Install instance");
                 ui.selectable_value(&mut self.page, Page::Launch, "Launch instance");
                 ui.selectable_value(&mut self.page, Page::Mods, "Search mods");
+                ui.selectable_value(&mut self.page, Page::Settings, "Settings");
             });
             ui.separator();
             match self.page {
                 Page::Install => self.install_page(ui),
                 Page::Launch => self.launch_page(ui),
                 Page::Mods => self.mods_page(ui),
+                Page::Settings => self.settings_page(ui),
             }
         });
     }
