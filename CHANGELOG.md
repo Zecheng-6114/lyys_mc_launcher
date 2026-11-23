@@ -16,9 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 模组加载器：支持安装 Fabric、Quilt、Forge 和 NeoForge，并可指定加载器版本。
 - 图形界面：安装、启动、内容、设置四个页面，提供版本列表、安装进度显示和主题背景。
 - 版本列表缓存：安装页的游戏版本和加载器版本会缓存在本地，重启后无需等待网络，点击刷新可获取最新列表。
+- 多目录管理：可添加、命名、浏览、切换和移除多个 Minecraft 目录，实例覆盖按目录分别保存。
 - 配置管理：支持全局配置与单实例覆盖，可在设置页中修改 Minecraft 目录、Java 路径和版本隔离。
 - 内容下载：从 Modrinth 搜索并安装模组、资源包、光影包和数据包，自动安装所需依赖，支持更新与卸载。
 - 整合包安装：支持 Modrinth（.mrpack）、CurseForge、MCBBS 和服务端整合包压缩包，自动安装对应游戏版本与加载器、下载整合包文件并解压覆盖目录；内容页新增「整合包」类型，可直接搜索并安装 Modrinth 整合包，也可从本地文件安装，命令行提供 `modpack install` / `modpack info`。
 - 命令行：提供账号、安装、启动、搜索、下载、配置和图形界面等命令，便于脚本化操作。
+- 命令行目录管理：`config dir` 支持 `--add`、`--use`、`--remove`、`--name`，`config show` 会标出当前目录。
 - 多语言：支持 English、简体中文、繁體中文和日本語，可跟随系统语言或手动切换。
 - 发布构建：自动构建 Linux 与 Windows 版本，生成带 SHA256 校验文件的压缩包。
+

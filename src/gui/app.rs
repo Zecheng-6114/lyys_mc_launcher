@@ -10,7 +10,7 @@ use mc_launcher_core::loader::LoaderKind;
 use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
 
 use crate::core::auth::{AccountSession, Auth};
-use crate::core::config::LauncherConfig;
+use crate::core::config::{DEFAULT_MINECRAFT_DIR, LauncherConfig};
 use crate::core::i18n::{self, Language, t, tf};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
 use crate::core::java::{self, JavaRuntime};
@@ -19,7 +19,6 @@ use crate::core::modrinth::{InstallOutcome, ModSearchHit, ModSearchResult, Proje
 
 use super::background::contour::paint_contour_background;
 
-pub(crate) const DEFAULT_MINECRAFT_DIR: &str = ".minecraft";
 /// Records which jar each installed mod slug maps to, so the UI can tell that a mod is installed.
 pub(crate) const MOD_MANIFEST_FILE: &str = ".lyys_mods.json";
 
@@ -56,7 +55,27 @@ pub(crate) enum Message {
     },
     JavaVersions(Vec<JavaRuntime>),
     ModpackProgress(String),
-    ModpackDone(Result<modpack::InstallReport, String>),
+    ModpackDone {
+        /// 发起安装时使用的目录，用于把隔离标记写回对应的目录。
+        dir: PathBuf,
+        result: Result<modpack::InstallReport, String>,
+    },
+    /// 系统文件夹选择框的结果；`None` 表示用户取消或当前环境不支持。
+    DirPicked {
+        target: DirPickTarget,
+        path: Option<String>,
+    },
+}
+
+/// 文件夹选择框的用途，决定结果写回哪里。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirPickTarget {
+    /// 设置页“添加目录”输入框。
+    NewDir,
+    /// 设置页某个已登记目录的路径。
+    Existing(usize),
+    /// 安装页/启动页的目录切换器。
+    Switch,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -186,7 +205,10 @@ pub(crate) struct App {
     pub(crate) page: Page,
     // 安装实例
     pub(crate) install_version: String,
-    pub(crate) minecraft_dir: String,
+    /// 设置页里正在输入的待添加目录。
+    pub(crate) new_dir_path: String,
+    /// 是否已有文件夹选择框在等待结果。
+    pub(crate) dir_picking: bool,
     pub(crate) install_loader: LoaderChoice,
     pub(crate) install_loader_version: String,
     pub(crate) loader_versions: Vec<String>,
@@ -249,21 +271,18 @@ pub(crate) struct App {
 impl App {
     fn new(auth: Auth, handle: Handle) -> Self {
         let (tx, rx) = mpsc::channel();
-        let (config, load_error) = match LauncherConfig::load() {
+        let (mut config, load_error) = match LauncherConfig::load() {
             Ok(config) => (config, None),
             Err(error) => (LauncherConfig::default(), Some(error)),
         };
+        // 首次运行或配置损坏时至少保留一个默认目录，设置页才有内容可管理
+        config.normalize();
         let language = Language::from_code(&config.language).unwrap_or_else(Language::detect);
         i18n::set_language(language);
         let config_status = load_error.map(|error| {
             let error = error.to_string();
             tf("error.config_load", &[("error", error.as_str())])
         });
-        let minecraft_dir = if config.minecraft_dir.trim().is_empty() {
-            DEFAULT_MINECRAFT_DIR.to_owned()
-        } else {
-            config.minecraft_dir.trim().to_owned()
-        };
         // 留空表示启动时按游戏版本自动匹配本机 Java
         let java_path = config.java_path.trim().to_owned();
         let mut app = Self {
@@ -276,7 +295,8 @@ impl App {
             offline_name: String::new(),
             page: Page::Install,
             install_version: String::new(),
-            minecraft_dir,
+            new_dir_path: String::new(),
+            dir_picking: false,
             install_loader: LoaderChoice::Vanilla,
             install_loader_version: String::new(),
             loader_versions: Vec::new(),
@@ -356,9 +376,19 @@ impl App {
         }
     }
 
+    /// 当前活动的 Minecraft 目录；配置异常时退回默认目录。
+    pub(crate) fn minecraft_dir(&self) -> PathBuf {
+        self.config
+            .active_dir()
+            .map(|dir| dir.path.trim())
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_MINECRAFT_DIR))
+    }
+
     pub(crate) fn scan_installed(&mut self) {
-        let dir = PathBuf::from(self.minecraft_dir.trim());
-        self.installed_dir = self.minecraft_dir.trim().to_owned();
+        let dir = self.minecraft_dir();
+        self.installed_dir = dir.display().to_string();
         match install::installed_versions(&dir) {
             Ok(versions) => {
                 self.installed_error = None;
@@ -401,15 +431,19 @@ impl App {
     /// Whether `instance` falls back to the global configuration.
     pub(crate) fn instance_uses_global(&self, instance: &str) -> bool {
         self.config
-            .instances
-            .get(instance)
+            .active_dir()
+            .and_then(|dir| dir.instances.get(instance))
             .map(|config| config.use_global)
             .unwrap_or(true)
     }
 
     /// Version isolation for `instance`: its own config, else the global toggle.
     pub(crate) fn effective_isolate(&self, instance: &str) -> bool {
-        match self.config.instances.get(instance) {
+        match self
+            .config
+            .active_dir()
+            .and_then(|dir| dir.instances.get(instance))
+        {
             Some(config) if !config.use_global => config.isolate,
             _ => self.isolate,
         }
@@ -418,7 +452,11 @@ impl App {
     /// Java executable for `instance`: its own config, else the global one.
     /// `None` means no Java was configured and one is matched at launch time.
     pub(crate) fn effective_java(&self, instance: &str) -> Option<PathBuf> {
-        let configured = match self.config.instances.get(instance) {
+        let configured = match self
+            .config
+            .active_dir()
+            .and_then(|dir| dir.instances.get(instance))
+        {
             Some(config) if !config.use_global => config.java_path.trim(),
             _ => "",
         };
@@ -452,7 +490,7 @@ impl App {
             return;
         }
         self.java_scanning = true;
-        let dir = PathBuf::from(self.minecraft_dir.trim());
+        let dir = self.minecraft_dir();
         let known = self.java_candidates();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -462,9 +500,15 @@ impl App {
         });
     }
 
-    /// Persist the configuration, syncing the runtime global values into it.
+    /// Persist the configuration, syncing the runtime global values into it,
+    /// then refresh the installed list.
     pub(crate) fn save_config(&mut self) {
-        self.config.minecraft_dir = self.minecraft_dir.trim().to_owned();
+        self.persist_config();
+        self.scan_installed();
+    }
+
+    /// 只写配置文件，不刷新已安装列表。
+    fn persist_config(&mut self) {
         self.config.java_path = self.java_path.trim().to_owned();
         self.config.java_versions = self.java_candidates();
         self.config.isolate = self.isolate;
@@ -473,12 +517,89 @@ impl App {
             Ok(path) => {
                 let path = path.display().to_string();
                 self.config_status = Some(tf("common.saved_to", &[("path", path.as_str())]));
-                self.scan_installed();
             }
             Err(error) => {
                 let error = error.to_string();
                 self.config_status = Some(tf("error.save_failed", &[("error", error.as_str())]));
             }
+        }
+    }
+
+    /// 添加目录（若不存在）并切换过去，立即保存。
+    pub(crate) fn use_dir(&mut self, path: &str) {
+        self.config.select_dir(path);
+        self.save_config();
+    }
+
+    /// 移除指定目录，至少保留一个；移除当前目录时会切到第一个。
+    pub(crate) fn remove_dir(&mut self, index: usize) {
+        if self.config.minecraft_dirs.len() <= 1 || index >= self.config.minecraft_dirs.len() {
+            return;
+        }
+        self.config.minecraft_dirs.remove(index);
+        // 保存时会重新对齐当前目录，不会指向已删除的条目
+        self.save_config();
+    }
+
+    /// 在后台线程打开系统文件夹选择框，避免对话框期间界面卡住。
+    pub(crate) fn request_dir_pick(&mut self, target: DirPickTarget, ctx: &egui::Context) {
+        if self.dir_picking {
+            return;
+        }
+        self.dir_picking = true;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        let _ = self.handle.spawn_blocking(move || {
+            let picked = rfd::FileDialog::new().pick_folder();
+            let _ = tx.send(Message::DirPicked {
+                target,
+                path: picked.map(|path| path.display().to_string()),
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Minecraft 目录切换器，安装页和启动页共用。
+    pub(crate) fn dir_switcher(&mut self, ui: &mut egui::Ui) {
+        ui.label(t("settings.minecraft_dir"));
+        let current = self
+            .config
+            .active_dir()
+            .map(|dir| dir.path.trim().to_owned())
+            .unwrap_or_default();
+        let choices: Vec<(String, String)> = self
+            .config
+            .minecraft_dirs
+            .iter()
+            .map(|dir| {
+                let path = dir.path.trim().to_owned();
+                let name = dir.name.trim();
+                let label = if name.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{name}  ({path})")
+                };
+                (path, label)
+            })
+            .collect();
+        let selected_text = choices
+            .iter()
+            .find(|(path, _)| path == &current)
+            .map(|(_, label)| label.clone())
+            .unwrap_or_else(|| current.clone());
+        let mut selected = current.clone();
+        egui::ComboBox::from_id_salt("active_minecraft_dir")
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                for (path, label) in &choices {
+                    ui.selectable_value(&mut selected, path.clone(), label);
+                }
+            });
+        if ui.button(t("settings.browse")).clicked() {
+            self.request_dir_pick(DirPickTarget::Switch, ui.ctx());
+        }
+        if selected != current {
+            self.use_dir(&selected);
         }
     }
 
@@ -600,7 +721,7 @@ impl eframe::App for App {
                 },
                 Message::Progress(progress) => self.install_progress = Some(progress),
                 Message::ModpackProgress(line) => self.modpack_progress = Some(line),
-                Message::ModpackDone(result) => {
+                Message::ModpackDone { dir, result } => {
                     self.modpack_installing = false;
                     self.modpack_progress = None;
                     self.mod_installing = None;
@@ -612,7 +733,10 @@ impl eframe::App for App {
                             self.log
                                 .push(tf("modpack.installed", &[("version", version.as_str())]));
                             self.log.push(report.timings.summary());
+                            // 安装完成后立即刷新已安装列表，并把隔离标记写回对应目录
+                            modpack::isolate_instance(&mut self.config, &dir, &version);
                             self.launch_version = version;
+                            self.persist_config();
                             self.scan_installed();
                         }
                         Err(error) => {
@@ -621,6 +745,33 @@ impl eframe::App for App {
                             self.modpack_error = Some(line.clone());
                             self.log.push(line);
                         }
+                    }
+                }
+                Message::DirPicked { target, path } => {
+                    self.dir_picking = false;
+                    match path {
+                        Some(path) => match target {
+                            DirPickTarget::NewDir => self.new_dir_path = path,
+                            DirPickTarget::Existing(index) => {
+                                let was_active =
+                                    self.config.active_index() == Some(index);
+                                if let Some(dir) = self.config.minecraft_dirs.get_mut(index) {
+                                    dir.path = path;
+                                }
+                                if was_active {
+                                    if let Some(path) = self
+                                        .config
+                                        .minecraft_dirs
+                                        .get(index)
+                                        .map(|dir| dir.path.trim().to_owned())
+                                    {
+                                        self.config.active_minecraft_dir = path;
+                                    }
+                                }
+                            }
+                            DirPickTarget::Switch => self.use_dir(&path),
+                        },
+                        None => self.log.push(t("settings.browse_none").to_owned()),
                     }
                 }
                 Message::Versions(result) => {
@@ -782,7 +933,7 @@ impl eframe::App for App {
             self.reload_versions(&ctx);
         }
 
-        let current_dir = self.minecraft_dir.trim().to_owned();
+        let current_dir = self.minecraft_dir().display().to_string();
         if current_dir != self.installed_dir {
             self.scan_installed();
         }

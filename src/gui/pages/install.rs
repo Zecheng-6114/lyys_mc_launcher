@@ -125,8 +125,7 @@ impl App {
             }
         }
         ui.horizontal(|ui| {
-            ui.label(t("settings.minecraft_dir"));
-            ui.add(egui::TextEdit::singleline(&mut self.minecraft_dir).id_salt("install_dir"));
+            self.dir_switcher(ui);
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -215,7 +214,7 @@ impl App {
             skipped: 0,
             current: None,
         });
-        let dir = PathBuf::from(self.minecraft_dir.trim());
+        let dir = self.minecraft_dir();
         let java = if self.java_path.trim().is_empty() {
             PathBuf::from("java")
         } else {

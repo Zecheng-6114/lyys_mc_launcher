@@ -11,7 +11,7 @@ use crate::core::i18n::{t, tf};
 use crate::core::modpack::{self, InstallOptions, PackProgress};
 use crate::core::modrinth::{self, ModSearchRequest, ProjectType};
 use crate::gui::app::{
-    App, DEFAULT_MINECRAFT_DIR, MOD_MANIFEST_FILE, Message, ModAction, ModRecord,
+    App, MOD_MANIFEST_FILE, Message, ModAction, ModRecord,
 };
 use crate::gui::components::buttons::mod_result;
 
@@ -387,7 +387,7 @@ impl App {
 
     /// Game directory: `versions/<instance>` when version isolation is on.
     pub(crate) fn game_dir(&self) -> PathBuf {
-        let base = PathBuf::from(self.minecraft_dir.trim());
+        let base = self.minecraft_dir();
         match self.mods_target_instance() {
             Some(instance) if self.mods_isolate() => base.join("versions").join(instance),
             _ => base,
@@ -611,11 +611,7 @@ impl App {
         self.modpack_notice = None;
         self.modpack_error = None;
         self.modpack_progress = Some(t("modpack.installing").to_owned());
-        let dir = PathBuf::from(if self.minecraft_dir.trim().is_empty() {
-            DEFAULT_MINECRAFT_DIR
-        } else {
-            self.minecraft_dir.trim()
-        });
+        let dir = self.minecraft_dir();
         let java = if self.java_path.trim().is_empty() {
             PathBuf::from("java")
         } else {
@@ -626,6 +622,7 @@ impl App {
         let progress_tx = tx.clone();
         let progress_ctx = ctx.clone();
         let done_ctx = ctx.clone();
+        let done_dir = dir.clone();
         self.handle.spawn(async move {
             let options = InstallOptions {
                 minecraft_dir: &dir,
@@ -639,7 +636,10 @@ impl App {
             let result = modpack::install_file(&path, &options, reporter)
                 .await
                 .map_err(|error| error.to_string());
-            let _ = tx.send(Message::ModpackDone(result));
+            let _ = tx.send(Message::ModpackDone {
+                dir: done_dir,
+                result,
+            });
             done_ctx.request_repaint();
         });
     }
@@ -734,11 +734,7 @@ impl App {
             self.modpack_progress = Some(t("modpack.installing").to_owned());
             self.modpack_notice = None;
             self.modpack_error = None;
-            let minecraft_dir = PathBuf::from(if self.minecraft_dir.trim().is_empty() {
-                DEFAULT_MINECRAFT_DIR
-            } else {
-                self.minecraft_dir.trim()
-            });
+            let minecraft_dir = self.minecraft_dir();
             let java = self
                 .effective_java("")
                 .or_else(|| {
@@ -752,6 +748,7 @@ impl App {
             let progress_tx = self.tx.clone();
             let ctx = ctx.clone();
             let progress_ctx = ctx.clone();
+            let done_dir = minecraft_dir.clone();
             self.handle.spawn(async move {
                 // 在线安装同样用真实进度回调，而不是空回调
                 let reporter = Arc::new(move |progress: PackProgress| {
@@ -767,7 +764,10 @@ impl App {
                     reporter,
                 )
                 .await;
-                let _ = tx.send(Message::ModpackDone(result.map_err(|error| error.to_string())));
+                let _ = tx.send(Message::ModpackDone {
+                    dir: done_dir,
+                    result: result.map_err(|error| error.to_string()),
+                });
                 ctx.request_repaint();
             });
             return;

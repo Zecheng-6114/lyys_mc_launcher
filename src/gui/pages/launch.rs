@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use eframe::egui;
@@ -12,8 +12,7 @@ impl App {
     pub(crate) fn launch_page(&mut self, ui: &mut egui::Ui) {
         ui.heading(t("nav.launch"));
         ui.horizontal(|ui| {
-            ui.label(t("settings.minecraft_dir"));
-            ui.add(egui::TextEdit::singleline(&mut self.minecraft_dir).id_salt("launch_dir"));
+            self.dir_switcher(ui);
             if ui.button(t("launch.scan")).clicked() {
                 self.scan_installed();
             }
@@ -90,7 +89,7 @@ impl App {
             return;
         }
         self.launching = true;
-        let dir = PathBuf::from(self.minecraft_dir.trim());
+        let dir = self.minecraft_dir();
         let java = self.effective_java(&version);
         let java_candidates = self.java_candidates();
         let isolate = self.effective_isolate(&version);

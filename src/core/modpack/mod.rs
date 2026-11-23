@@ -360,7 +360,6 @@ pub async fn install_file(
         &game_dir.join(&manifest.manifest_name),
     )?;
     write_record(&game_dir, &manifest, path, &excluded)?;
-    isolate_instance(&version_id)?;
 
     Ok(InstallReport {
         version_id,
@@ -996,17 +995,23 @@ fn write_record(
     Ok(())
 }
 
-/// 整合包的内容放在隔离的游戏目录里，安装后把这个版本标记为隔离实例。
-fn isolate_instance(version_id: &str) -> Result<(), ModpackError> {
-    let mut config = LauncherConfig::load().map_err(|error| ModpackError::Parse(error.to_string()))?;
-    let entry = config.instances.entry(version_id.to_owned()).or_default();
+/// 整合包的内容放在隔离的游戏目录里，安装后需要把这个版本标记为隔离实例。
+///
+/// 配置写回放在调用方（界面线程/CLI 进程）完成，避免后台安装线程写整份配置
+/// 时覆盖界面里尚未保存的设置。目录未登记时不做任何修改。
+pub fn isolate_instance(
+    config: &mut LauncherConfig,
+    minecraft_dir: &Path,
+    version_id: &str,
+) -> bool {
+    let Some(instances) = config.dir_instances_mut(minecraft_dir) else {
+        return false;
+    };
+    let entry = instances.entry(version_id.to_owned()).or_default();
     entry.use_global = false;
     entry.isolate = true;
-    config.save().map_err(|error| ModpackError::Parse(error.to_string()))?;
-    Ok(())
+    true
 }
-
-/// 打开整合包压缩包，供 CLI 预览时复用路径检查。
 
 #[cfg(test)]
 mod tests {

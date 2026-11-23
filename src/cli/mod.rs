@@ -16,8 +16,6 @@ use crate::core::modpack::{self, InstallOptions, PackProgress};
 use crate::core::modrinth::{self, ModrinthError, ModSearchRequest};
 use crate::gui;
 
-const DEFAULT_MINECRAFT_DIR: &str = ".minecraft";
-
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error(transparent)]
@@ -124,6 +122,7 @@ enum ConfigAction {
     Show,
     /// Update the global configuration.
     Set {
+        /// Register the directory (if it is new) and make it the active one.
         #[arg(long)]
         minecraft_dir: Option<PathBuf>,
         #[arg(long)]
@@ -134,6 +133,21 @@ enum ConfigAction {
         /// Disable version isolation.
         #[arg(long)]
         no_isolate: bool,
+    },
+    /// Manage the Minecraft directories known to the launcher.
+    Dir {
+        /// Register a directory (if it is new) and make it active.
+        #[arg(long)]
+        add: Option<PathBuf>,
+        /// Make an already registered directory the active one.
+        #[arg(long = "use")]
+        use_dir: Option<PathBuf>,
+        /// Forget a registered directory.
+        #[arg(long)]
+        remove: Option<PathBuf>,
+        /// Display name applied together with --add or --use.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Use the global configuration or override it for one instance.
     Instance {
@@ -636,7 +650,7 @@ async fn run_modpack(args: ModpackArgs) -> Result<(), CliError> {
 }
 
 async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
-    let config = LauncherConfig::load()?;
+    let mut config = LauncherConfig::load()?;
     let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
     let java = args
         .java
@@ -662,6 +676,11 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
         .map_err(|error| CliError::Task(error.to_string()));
     println!();
     let report = report?;
+    // 整合包放在隔离目录里，安装完成后把该版本标记为隔离实例；
+    // 显式指定的安装目录先登记，否则隔离标记没有归属
+    config.register_dir(&minecraft_dir.display().to_string());
+    modpack::isolate_instance(&mut config, &minecraft_dir, &report.version_id);
+    config.save()?;
     println!(
         "{}",
         tf("modpack.installed", &[("version", report.version_id.as_str())])
@@ -710,17 +729,11 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             let path = config::path()?;
             let path = path.display().to_string();
             println!("{}", tf("cli.config.file", &[("path", path.as_str())]));
-            let dir = if config.minecraft_dir.trim().is_empty() {
-                t("cli.config.default_dir")
-            } else {
-                config.minecraft_dir.trim()
-            };
             let java = if config.java_path.trim().is_empty() {
                 t("settings.java.auto")
             } else {
                 config.java_path.trim()
             };
-            println!("{}", tf("cli.config.minecraft_dir", &[("path", dir)]));
             println!("{}", tf("cli.config.java_path", &[("path", java)]));
             if !config.java_versions.is_empty() {
                 println!("{}", t("cli.java.known"));
@@ -729,36 +742,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 }
             }
             println!("{}", tf("common.version_isolation", &[("value", yes_no(config.isolate))]));
-            if config.instances.is_empty() {
-                println!("{}", t("cli.config.overrides_none"));
-            } else {
-                println!("{}", t("cli.config.overrides"));
-                for (id, entry) in &config.instances {
-                    if entry.use_global {
-                        println!(
-                            "{}",
-                            tf("cli.config.instance_global", &[("instance", id.as_str())])
-                        );
-                    } else {
-                        let java = if entry.java_path.trim().is_empty() {
-                            t("common.global_paren").to_owned()
-                        } else {
-                            entry.java_path.trim().to_owned()
-                        };
-                        println!(
-                            "{}",
-                            tf(
-                                "cli.config.instance_detail",
-                                &[
-                                    ("instance", id.as_str()),
-                                    ("isolate", yes_no(entry.isolate)),
-                                    ("java", java.as_str()),
-                                ],
-                            )
-                        );
-                    }
-                }
-            }
+            print_dirs(&config);
         }
         ConfigAction::Set {
             minecraft_dir,
@@ -767,7 +751,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             no_isolate,
         } => {
             if let Some(dir) = minecraft_dir {
-                config.minecraft_dir = dir.display().to_string();
+                config.select_dir(&dir.display().to_string());
             }
             if let Some(java) = java {
                 config.java_path = java.display().to_string();
@@ -781,6 +765,58 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             let path = path.display().to_string();
             println!("{}", tf("common.config_saved", &[("path", path.as_str())]));
         }
+        ConfigAction::Dir {
+            add,
+            use_dir,
+            remove,
+            name,
+        } => {
+            let selected = [add.is_some(), use_dir.is_some(), remove.is_some()]
+                .iter()
+                .filter(|chosen| **chosen)
+                .count();
+            if selected > 1 {
+                return Err(CliError::Usage(t("cli.dir.one_action").to_owned()));
+            }
+            if name.is_some() && add.is_none() && use_dir.is_none() {
+                return Err(CliError::Usage(
+                    t("cli.dir.name_requires_target").to_owned(),
+                ));
+            }
+            if let Some(path) = add {
+                let path = path.display().to_string();
+                config.select_dir(&path);
+                if let Some(name) = name {
+                    if let Some(dir) = config.active_dir_mut() {
+                        dir.name = name;
+                    }
+                }
+            } else if let Some(path) = use_dir {
+                let path = path.display().to_string();
+                let index = config.dir_index(&path).ok_or_else(|| {
+                    CliError::Usage(tf("cli.dir.not_found", &[("path", path.as_str())]))
+                })?;
+                config.active_minecraft_dir = config.minecraft_dirs[index].path.clone();
+                if let Some(name) = name {
+                    config.minecraft_dirs[index].name = name;
+                }
+            } else if let Some(path) = remove {
+                let path = path.display().to_string();
+                let index = config.dir_index(&path).ok_or_else(|| {
+                    CliError::Usage(tf("cli.dir.not_found", &[("path", path.as_str())]))
+                })?;
+                if config.minecraft_dirs.len() <= 1 {
+                    return Err(CliError::Usage(t("cli.dir.keep_one").to_owned()));
+                }
+                config.minecraft_dirs.remove(index);
+            } else {
+                print_dirs(&config);
+                return Ok(());
+            }
+            let path = config.save()?;
+            let path = path.display().to_string();
+            println!("{}", tf("common.config_saved", &[("path", path.as_str())]));
+        }
         ConfigAction::Instance {
             version,
             global,
@@ -788,8 +824,15 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             no_isolate,
             java,
         } => {
+            // 实例覆盖只作用于当前目录，避免不同目录下的同名版本互相影响
+            if config.minecraft_dirs.is_empty() {
+                config.select_dir(config::DEFAULT_MINECRAFT_DIR);
+            }
+            let dir = config
+                .active_dir_mut()
+                .expect("a minecraft directory exists after select_dir");
             if global {
-                config.instances.insert(
+                dir.instances.insert(
                     version.clone(),
                     InstanceConfig {
                         use_global: true,
@@ -803,7 +846,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                             .to_owned(),
                     ));
                 }
-                let entry = config.instances.entry(version.clone()).or_default();
+                let entry = dir.instances.entry(version.clone()).or_default();
                 entry.use_global = false;
                 if isolate {
                     entry.isolate = true;
@@ -844,11 +887,73 @@ fn resolve_minecraft_dir(
     if let Some(dir) = dir {
         return Ok(dir);
     }
-    let configured = config.minecraft_dir.trim();
+    let configured = config
+        .active_dir()
+        .map(|dir| dir.path.trim())
+        .unwrap_or("");
     if !configured.is_empty() {
         return Ok(PathBuf::from(configured));
     }
-    Ok(std::env::current_dir()?.join(DEFAULT_MINECRAFT_DIR))
+    Ok(std::env::current_dir()?.join(config::DEFAULT_MINECRAFT_DIR))
+}
+
+fn print_dirs(config: &LauncherConfig) {
+    if config.minecraft_dirs.is_empty() {
+        println!("{}", t("cli.config.dirs_none"));
+        return;
+    }
+    println!("{}", t("cli.config.dirs"));
+    let active = config.active_index();
+    for (index, dir) in config.minecraft_dirs.iter().enumerate() {
+        let path = dir.path.trim();
+        let name = dir.name.trim();
+        let label = if name.is_empty() {
+            path.to_owned()
+        } else {
+            format!("{name}  ({path})")
+        };
+        let marker = if active == Some(index) {
+            t("cli.config.dir_active")
+        } else {
+            ""
+        };
+        println!(
+            "{}",
+            tf(
+                "cli.config.dir_item",
+                &[("label", label.as_str()), ("active", marker)],
+            )
+        );
+        if dir.instances.is_empty() {
+            continue;
+        }
+        println!("{}", t("cli.config.overrides"));
+        for (id, entry) in &dir.instances {
+            if entry.use_global {
+                println!(
+                    "{}",
+                    tf("cli.config.instance_global", &[("instance", id.as_str())])
+                );
+            } else {
+                let java = if entry.java_path.trim().is_empty() {
+                    t("common.global_paren").to_owned()
+                } else {
+                    entry.java_path.trim().to_owned()
+                };
+                println!(
+                    "{}",
+                    tf(
+                        "cli.config.instance_detail",
+                        &[
+                            ("instance", id.as_str()),
+                            ("isolate", yes_no(entry.isolate)),
+                            ("java", java.as_str()),
+                        ],
+                    )
+                );
+            }
+        }
+    }
 }
 
 fn print_accounts(auth: &Auth) -> Result<(), AuthError> {
