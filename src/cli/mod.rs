@@ -39,7 +39,7 @@ pub enum CliError {
 }
 
 #[derive(Parser)]
-#[command(version, about = "LYYS Minecraft launcher")]
+#[command(version, about = "LYYS MC Launcher")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -144,15 +144,37 @@ enum ConfigAction {
 
 #[derive(Args)]
 struct SearchArgs {
-    /// Search query; leave empty to list popular mods.
+    /// Search query; leave empty to list popular projects.
     #[arg(long)]
     query: Option<String>,
-    /// Only show mods for this Minecraft version.
+    /// Project type: mod, resourcepack, shader or datapack.
+    #[arg(long = "type", value_enum, default_value = "mod")]
+    kind: ContentType,
+    /// Only show projects for this Minecraft version.
     #[arg(long)]
     minecraft: Option<String>,
     /// Only show mods for this loader: fabric, quilt, forge or neoforge.
     #[arg(long)]
     loader: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ContentType {
+    Mod,
+    Resourcepack,
+    Shader,
+    Datapack,
+}
+
+impl From<ContentType> for modrinth::ProjectType {
+    fn from(kind: ContentType) -> Self {
+        match kind {
+            ContentType::Mod => Self::Mod,
+            ContentType::Resourcepack => Self::ResourcePack,
+            ContentType::Shader => Self::ShaderPack,
+            ContentType::Datapack => Self::DataPack,
+        }
+    }
 }
 
 pub async fn run() -> Result<(), CliError> {
@@ -311,20 +333,31 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
 }
 
 async fn run_search(args: SearchArgs) -> Result<(), CliError> {
+    let kind = modrinth::ProjectType::from(args.kind);
+    let loader = if kind == modrinth::ProjectType::Mod {
+        args.loader.as_deref()
+    } else {
+        None
+    };
     let result = modrinth::search(ModSearchRequest {
         query: args.query.as_deref().unwrap_or(""),
+        project_type: kind,
         game_version: args.minecraft.as_deref(),
-        loader: args.loader.as_deref(),
+        loader,
         offset: 0,
     })
     .await?;
     if result.hits.is_empty() {
-        println!("no mods found");
+        println!("no content found");
         return Ok(());
     }
     for hit in &result.hits {
         println!("{}  ·  {} downloads", hit.title, hit.downloads);
-        println!("  https://modrinth.com/mod/{}", hit.slug);
+        println!(
+            "  https://modrinth.com/{}/{}",
+            kind.url_segment(),
+            hit.slug
+        );
     }
     println!();
     println!("{} results, showing {}", result.total_hits, result.hits.len());

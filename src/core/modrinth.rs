@@ -24,6 +24,36 @@ pub enum ModrinthError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectType {
+    Mod,
+    ResourcePack,
+    ShaderPack,
+    DataPack,
+}
+
+impl ProjectType {
+    /// Modrinth `project_type` facet value.
+    pub fn facet(self) -> &'static str {
+        match self {
+            Self::Mod => "mod",
+            Self::ResourcePack => "resourcepack",
+            Self::ShaderPack => "shader",
+            Self::DataPack => "datapack",
+        }
+    }
+
+    /// Path segment of the public project page.
+    pub fn url_segment(self) -> &'static str {
+        match self {
+            Self::Mod => "mod",
+            Self::ResourcePack => "resourcepack",
+            Self::ShaderPack => "shader",
+            Self::DataPack => "datapack",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModSearchHit {
     #[serde(default)]
@@ -58,6 +88,7 @@ struct SearchResponse {
 
 pub struct ModSearchRequest<'a> {
     pub query: &'a str,
+    pub project_type: ProjectType,
     pub game_version: Option<&'a str>,
     /// Modrinth loader facet, e.g. `fabric`, `quilt`, `forge`, `neoforge`.
     pub loader: Option<&'a str>,
@@ -118,9 +149,10 @@ impl InstallOutcome {
     }
 }
 
-/// Search Modrinth for mods matching the query and optional version/loader filters.
+/// Search Modrinth for projects of `request.project_type` matching the filters.
 pub async fn search(request: ModSearchRequest<'_>) -> Result<ModSearchResult, ModrinthError> {
-    let mut facets: Vec<Vec<String>> = vec![vec!["project_type:mod".to_owned()]];
+    let mut facets: Vec<Vec<String>> =
+        vec![vec![format!("project_type:{}", request.project_type.facet())]];
     if let Some(game_version) = request.game_version.filter(|value| !value.trim().is_empty()) {
         facets.push(vec![format!("versions:{game_version}")]);
     }
@@ -180,7 +212,7 @@ pub async fn install_with_dependencies(
         };
         let version = match version {
             Some(version) => Some(version),
-            None => fetch_versions(&client, &project_id, game_version, loader)
+            None => fetch_versions(&client, &project_id, game_version, Some(loader))
                 .await?
                 .into_iter()
                 .next(),
@@ -245,11 +277,50 @@ pub async fn install_with_dependencies(
     Ok(InstallOutcome { installed, skipped })
 }
 
+/// Install one resource pack, shader pack or data pack without a dependency chain.
+pub async fn install_content(
+    project: &str,
+    game_version: &str,
+    target_dir: &Path,
+) -> Result<InstallOutcome, ModrinthError> {
+    let client = client()?;
+    std::fs::create_dir_all(target_dir)?;
+    let versions = fetch_versions(&client, project, game_version, None).await?;
+    let Some(version) = versions.into_iter().next() else {
+        return Err(ModrinthError::NoCompatibleVersion(project.to_owned()));
+    };
+    let mut files = version.files;
+    let file = match files.iter().position(|file| file.primary) {
+        Some(index) => files.remove(index),
+        None if files.is_empty() => return Err(ModrinthError::NoFile(project.to_owned())),
+        None => files.remove(0),
+    };
+    let bytes = client
+        .get(file.url.as_str())
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    let filename = sanitize_filename(&file.filename);
+    std::fs::write(target_dir.join(&filename), bytes)?;
+    Ok(InstallOutcome {
+        installed: vec![InstalledMod {
+            project_id: project.to_owned(),
+            filename,
+            version_id: version.id,
+            version_number: version.version_number,
+            dependencies: Vec::new(),
+        }],
+        skipped: Vec::new(),
+    })
+}
+
 /// Latest compatible version of `project`, as `(version id, version number)`.
 pub async fn latest_version(
     project: &str,
     game_version: &str,
-    loader: &str,
+    loader: Option<&str>,
 ) -> Result<Option<(String, String)>, ModrinthError> {
     let client = client()?;
     let versions = fetch_versions(&client, project, game_version, loader).await?;
@@ -263,15 +334,18 @@ async fn fetch_versions(
     client: &reqwest::Client,
     project: &str,
     game_version: &str,
-    loader: &str,
+    loader: Option<&str>,
 ) -> Result<Vec<ModVersion>, ModrinthError> {
-    let params: Vec<(&str, String)> = vec![
-        (
-            "game_versions",
-            serde_json::to_string(&[game_version]).unwrap_or_default(),
-        ),
-        ("loaders", serde_json::to_string(&[loader]).unwrap_or_default()),
-    ];
+    let mut params: Vec<(&str, String)> = vec![(
+        "game_versions",
+        serde_json::to_string(&[game_version]).unwrap_or_default(),
+    )];
+    if let Some(loader) = loader.filter(|loader| !loader.trim().is_empty()) {
+        params.push((
+            "loaders",
+            serde_json::to_string(&[loader]).unwrap_or_default(),
+        ));
+    }
     let url = format!("https://api.modrinth.com/v2/project/{project}/version");
     Ok(client
         .get(url)
