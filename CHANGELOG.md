@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.1-alpha] - 2026-11-24
+
 ### Added
 
 - 账号登录：支持 Microsoft 正版账号（设备码登录）与离线账号，可查看、切换和移除账号。
@@ -23,5 +25,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 命令行：提供账号、安装、启动、搜索、下载、配置和图形界面等命令，便于脚本化操作。
 - 命令行目录管理：`config dir` 支持 `--add`、`--use`、`--remove`、`--name`，`config show` 会标出当前目录。
 - 多语言：支持 English、简体中文、繁體中文和日本語，可跟随系统语言或手动切换。
-- 发布构建：自动构建 Linux 与 Windows 版本，生成带 SHA256 校验文件的压缩包。
+- 发布构建：推送 `v*` 标签后自动构建 Linux 与 Windows 版本，生成带 SHA256 校验文件的压缩包，并创建 GitHub Release，更新说明取自 CHANGELOG。
 
