@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
 use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
@@ -11,6 +12,7 @@ use crate::core::i18n::{self, t, tf};
 use crate::core::install;
 use crate::core::java;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
+use crate::core::modpack::{self, InstallOptions, PackProgress};
 use crate::core::modrinth::{self, ModrinthError, ModSearchRequest};
 use crate::gui;
 
@@ -56,6 +58,7 @@ enum Command {
     Java,
     Search(SearchArgs),
     Download(DownloadArgs),
+    Modpack(ModpackArgs),
     Config(ConfigArgs),
     Gui,
 }
@@ -189,6 +192,34 @@ struct DownloadArgs {
     world: Option<String>,
 }
 
+#[derive(Args)]
+struct ModpackArgs {
+    #[command(subcommand)]
+    action: ModpackAction,
+}
+
+#[derive(Subcommand)]
+enum ModpackAction {
+    /// Install a modpack from a .mrpack, CurseForge, MCBBS or server pack archive.
+    Install(ModpackInstallArgs),
+    /// Print what a modpack archive contains without installing it.
+    Info { file: PathBuf },
+}
+
+#[derive(Args)]
+struct ModpackInstallArgs {
+    /// Path to the modpack archive.
+    file: PathBuf,
+    #[arg(long)]
+    minecraft_dir: Option<PathBuf>,
+    /// Java used by the Forge/NeoForge installer.
+    #[arg(long)]
+    java: Option<PathBuf>,
+    /// Also install files the pack marks as optional.
+    #[arg(long)]
+    with_optional: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ContentType {
     Mod,
@@ -221,6 +252,7 @@ pub async fn run() -> Result<(), CliError> {
         Some(Command::Java) => run_java_list(),
         Some(Command::Search(args)) => run_search(args).await,
         Some(Command::Download(args)) => run_download(args).await,
+        Some(Command::Modpack(args)) => run_modpack(args).await,
         Some(Command::Config(args)) => run_config(args.action),
         Some(Command::Gui) | None => gui::run().map_err(CliError::Gui),
     }
@@ -504,6 +536,11 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
                     }
                     game_dir.join("saves").join(world).join("datapacks")
                 }
+                modrinth::ProjectType::Modpack => {
+                    return Err(CliError::Usage(
+                        t("modpacks are installed with the modpack command").to_owned(),
+                    ));
+                }
             }
         }
     };
@@ -533,6 +570,116 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
         println!("{}", tf("missing dependencies: {}", &[skipped.as_str()]));
     }
     Ok(())
+}
+
+async fn run_modpack(args: ModpackArgs) -> Result<(), CliError> {
+    match args.action {
+        ModpackAction::Install(args) => run_modpack_install(args).await,
+        ModpackAction::Info { file } => {
+            let pack = modpack::inspect(&file)
+                .await
+                .map_err(|error| CliError::Task(error.to_string()))?;
+            println!(
+                "{}",
+                tf(
+                    "modpack {} ({})",
+                    &[pack.name.as_str(), pack.version.as_str()]
+                )
+            );
+            println!("{}", tf("provider: {}", &[pack.provider.name()]));
+            println!("{}", tf("Minecraft {}", &[pack.game_version.as_str()]));
+            if let Some(loader) = &pack.loader {
+                println!(
+                    "{}",
+                    tf("loader: {}", &[modpack::describe_loader(loader).as_str()])
+                );
+            }
+            if !pack.author.trim().is_empty() {
+                println!("{}", tf("author: {}", &[pack.author.as_str()]));
+            }
+            if !pack.description.trim().is_empty() {
+                println!("{}", pack.description);
+            }
+            let files = pack.installable_files(true).to_string();
+            let size = human_size(pack.installable_bytes(true));
+            println!("{}", tf("files: {}, size: {}", &[files.as_str(), size.as_str()]));
+            Ok(())
+        }
+    }
+}
+
+async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
+    let config = LauncherConfig::load()?;
+    let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
+    let java = args
+        .java
+        .or_else(|| configured_java(&config.java_path))
+        .or_else(|| get_java_executable().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("java"));
+    let options = InstallOptions {
+        minecraft_dir: &minecraft_dir,
+        java: &java,
+        with_optional: args.with_optional,
+    };
+    println!("{}", t("installing modpack..."));
+    let reporter = Arc::new(|progress: PackProgress| {
+        let line = match progress.stage {
+            "loader" => format!("{} {}", t("installing loader"), progress.done),
+            "files" => format!(
+                "{} {}/{}",
+                t("downloading files"),
+                progress.done,
+                progress.total
+            ),
+            "overrides" => t("extracting overrides").to_owned(),
+            _ => return,
+        };
+        print!("\r{line}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    });
+    let report = modpack::install_file(&args.file, &options, reporter)
+        .await
+        .map_err(|error| CliError::Task(error.to_string()));
+    println!();
+    let report = report?;
+    println!(
+        "{}",
+        tf("modpack installed: {}", &[report.version_id.as_str()])
+    );
+    let files = report.files.to_string();
+    let overrides = report.overrides.to_string();
+    println!(
+        "{}",
+        tf(
+            "installed {} files and {} overrides",
+            &[files.as_str(), overrides.as_str()]
+        )
+    );
+    if !report.excluded.is_empty() {
+        let skipped = report.excluded.join(", ");
+        println!(
+            "{}",
+            tf("skipped optional files: {}", &[skipped.as_str()])
+        );
+    }
+    let game_dir = report.game_dir.display().to_string();
+    println!("{}", tf("saved to {}", &[game_dir.as_str()]));
+    Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn run_config(action: ConfigAction) -> Result<(), CliError> {

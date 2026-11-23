@@ -15,6 +15,7 @@ use crate::core::i18n::{self, Language, t, tf};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
 use crate::core::java::{self, JavaRuntime};
 use crate::core::launch::{self, LaunchAccount, LaunchRequest};
+use crate::core::modpack::{self, InstallOptions, PackProgress};
 use crate::core::modrinth::{
     self, InstallOutcome, ModSearchHit, ModSearchRequest, ModSearchResult, ProjectType,
 };
@@ -137,6 +138,8 @@ enum Message {
         updates: HashMap<String, (String, String)>,
     },
     JavaVersions(Vec<JavaRuntime>),
+    ModpackProgress(String),
+    ModpackDone(Result<modpack::InstallReport, String>),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -315,6 +318,13 @@ struct App {
     installed_mods_dir: String,
     installed_kind: Option<ProjectType>,
     mod_updates: HashMap<String, (String, String)>,
+    // 安装整合包
+    modpack_file: String,
+    modpack_with_optional: bool,
+    modpack_installing: bool,
+    modpack_progress: Option<String>,
+    modpack_notice: Option<String>,
+    modpack_error: Option<String>,
     logging_in: bool,
     log: Vec<String>,
 }
@@ -393,6 +403,12 @@ impl App {
             installed_mods_dir: String::new(),
             installed_kind: None,
             mod_updates: HashMap::new(),
+            modpack_file: String::new(),
+            modpack_with_optional: false,
+            modpack_installing: false,
+            modpack_progress: None,
+            modpack_notice: None,
+            modpack_error: None,
             logging_in: false,
             log: Vec::new(),
         };
@@ -612,6 +628,7 @@ impl App {
                 .join("saves")
                 .join(self.mod_datapack_world.trim())
                 .join("datapacks"),
+            ProjectType::Modpack => self.game_dir(),
         }
     }
 
@@ -929,6 +946,64 @@ impl App {
         });
     }
 
+    fn start_modpack_install(&mut self, ctx: &egui::Context) {
+        if self.modpack_installing || self.mod_installing.is_some() {
+            return;
+        }
+        let path = PathBuf::from(self.modpack_file.trim());
+        if !path.is_file() {
+            self.modpack_error = Some(t("modpack file not found").to_owned());
+            return;
+        }
+        self.modpack_installing = true;
+        self.modpack_notice = None;
+        self.modpack_error = None;
+        self.modpack_progress = Some(t("installing modpack...").to_owned());
+        let dir = PathBuf::from(if self.minecraft_dir.trim().is_empty() {
+            DEFAULT_MINECRAFT_DIR
+        } else {
+            self.minecraft_dir.trim()
+        });
+        let java = if self.java_path.trim().is_empty() {
+            PathBuf::from("java")
+        } else {
+            PathBuf::from(self.java_path.trim())
+        };
+        let with_optional = self.modpack_with_optional;
+        let tx = self.tx.clone();
+        let progress_tx = tx.clone();
+        let progress_ctx = ctx.clone();
+        let done_ctx = ctx.clone();
+        self.handle.spawn(async move {
+            let options = InstallOptions {
+                minecraft_dir: &dir,
+                java: &java,
+                with_optional,
+            };
+            let reporter = Arc::new(move |progress: PackProgress| {
+                let line = match progress.stage {
+                    "loader" => {
+                        format!("{} {}", t("installing loader"), progress.done)
+                    }
+                    "files" => format!(
+                        "{} {}/{}",
+                        t("downloading files"),
+                        progress.done,
+                        progress.total
+                    ),
+                    _ => t("extracting overrides").to_owned(),
+                };
+                let _ = progress_tx.send(Message::ModpackProgress(line));
+                progress_ctx.request_repaint();
+            });
+            let result = modpack::install_file(&path, &options, reporter)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(Message::ModpackDone(result));
+            done_ctx.request_repaint();
+        });
+    }
+
     fn start_launch(&mut self, ctx: &egui::Context) {
         let version = self.launch_version.trim().to_owned();
         if version.is_empty() {
@@ -991,7 +1066,7 @@ impl App {
         let query = self.mod_query.trim().to_owned();
         let minecraft_version = self.mod_minecraft_version.trim().to_owned();
         let kind = self.mod_kind;
-        let loader = if kind == ProjectType::Mod {
+        let loader = if kind == ProjectType::Mod || kind == ProjectType::Modpack {
             self.mod_loader.map(loader_slug)
         } else {
             None
@@ -1043,15 +1118,49 @@ impl App {
             self.mod_error = Some(t("pick a world before installing data packs").to_owned());
             return;
         }
-        if self.mods_isolate() && self.mods_target_instance().is_none() {
+        if kind != ProjectType::Modpack
+            && self.mods_isolate()
+            && self.mods_target_instance().is_none()
+        {
             self.mod_error =
                 Some(t("version isolation is on, pick an instance to install into").to_owned());
             return;
         }
-        let target = self.content_dir(kind);
         self.mod_installing = Some(project.clone());
         self.mod_error = None;
         self.mod_notice = None;
+        if kind == ProjectType::Modpack {
+            let minecraft_dir = PathBuf::from(if self.minecraft_dir.trim().is_empty() {
+                DEFAULT_MINECRAFT_DIR
+            } else {
+                self.minecraft_dir.trim()
+            });
+            let java = self
+                .effective_java("")
+                .or_else(|| {
+                    self.java_versions
+                        .first()
+                        .map(|runtime| runtime.executable.clone())
+                })
+                .unwrap_or_else(|| PathBuf::from("java"));
+            let loader = loader.unwrap_or_default();
+            let tx = self.tx.clone();
+            let ctx = ctx.clone();
+            self.handle.spawn(async move {
+                let result = install_modpack_from_modrinth(
+                    &project,
+                    game_version.trim(),
+                    &loader,
+                    &minecraft_dir,
+                    &java,
+                )
+                .await;
+                let _ = tx.send(Message::ModpackDone(result.map_err(|error| error.to_string())));
+                ctx.request_repaint();
+            });
+            return;
+        }
+        let target = self.content_dir(kind);
         let loader = loader.unwrap_or_default();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -1309,6 +1418,7 @@ impl App {
                     ProjectType::ResourcePack,
                     ProjectType::ShaderPack,
                     ProjectType::DataPack,
+                    ProjectType::Modpack,
                 ] {
                     if ui
                         .selectable_value(&mut self.mod_kind, kind, content_label(kind))
@@ -1354,7 +1464,7 @@ impl App {
                     .hint_text(t("any"))
                     .desired_width(100.0),
             );
-            if self.mod_kind == ProjectType::Mod {
+            if self.mod_kind == ProjectType::Mod || self.mod_kind == ProjectType::Modpack {
                 ui.label(t("Loader:"));
                 egui::ComboBox::from_id_salt("mod_loader")
                     .selected_text(self.mod_loader.map(loader_label).unwrap_or(t("Any")))
@@ -1392,7 +1502,7 @@ impl App {
                         }
                     });
             }
-            if !self.installed.is_empty() {
+            if !self.installed.is_empty() && self.mod_kind != ProjectType::Modpack {
                 ui.label(t("From instance:"));
                 let mut picked: Option<(String, Option<String>, Option<&'static str>)> = None;
                 egui::ComboBox::from_id_salt("mod_instance")
@@ -1442,29 +1552,34 @@ impl App {
             ui.label(notice);
         }
         let game_dir = self.game_dir();
-        if self.mod_kind == ProjectType::DataPack
-            && self.datapack_worlds_dir != game_dir.display().to_string()
-        {
-            self.scan_worlds(&game_dir);
-        }
         let target_dir = self.content_dir(self.mod_kind);
-        if self.installed_mods_dir != target_dir.display().to_string()
-            || self.installed_kind != Some(self.mod_kind)
-        {
-            self.load_installed_mods(&target_dir, self.mod_kind);
-            self.start_update_check(ui.ctx(), &target_dir, self.mod_kind);
-        }
-        let isolated_suffix = if self.mods_isolate() {
-            t(" (isolated)")
+        if self.mod_kind == ProjectType::Modpack {
+            self.modpack_form(ui);
+            ui.separator();
         } else {
-            ""
-        };
-        let target = target_dir.display().to_string();
-        ui.label(
-            egui::RichText::new(tf("target: {}{}", &[target.as_str(), isolated_suffix]))
-                .weak()
-                .small(),
-        );
+            if self.mod_kind == ProjectType::DataPack
+                && self.datapack_worlds_dir != game_dir.display().to_string()
+            {
+                self.scan_worlds(&game_dir);
+            }
+            if self.installed_mods_dir != target_dir.display().to_string()
+                || self.installed_kind != Some(self.mod_kind)
+            {
+                self.load_installed_mods(&target_dir, self.mod_kind);
+                self.start_update_check(ui.ctx(), &target_dir, self.mod_kind);
+            }
+            let isolated_suffix = if self.mods_isolate() {
+                t(" (isolated)")
+            } else {
+                ""
+            };
+            let target = target_dir.display().to_string();
+            ui.label(
+                egui::RichText::new(tf("target: {}{}", &[target.as_str(), isolated_suffix]))
+                    .weak()
+                    .small(),
+            );
+        }
         if self.mod_results.is_empty() {
             if !self.mod_searching && self.mod_error.is_none() {
                 ui.label(t(
@@ -1483,7 +1598,9 @@ impl App {
                     ui.ctx().forget_all_images();
                 }
             });
-            let target_ready = !self.mods_isolate() || self.mods_target_instance().is_some();
+            let target_ready = self.mod_kind == ProjectType::Modpack
+                || !self.mods_isolate()
+                || self.mods_target_instance().is_some();
             let world_ready = self.mod_kind != ProjectType::DataPack
                 || !self.mod_datapack_world.trim().is_empty();
             let needs_loader = self.mod_kind == ProjectType::Mod;
@@ -1569,7 +1686,9 @@ impl App {
                     }
                     ModAction::Install => {
                         let game_version = self.mod_minecraft_version.trim().to_owned();
-                        let loader = if self.mod_kind == ProjectType::Mod {
+                        let loader = if self.mod_kind == ProjectType::Mod
+                            || self.mod_kind == ProjectType::Modpack
+                        {
                             self.mod_loader
                                 .map(|loader| loader_slug(loader).to_owned())
                         } else {
@@ -1640,6 +1759,53 @@ impl App {
                     self.goto_mod_page(self.mod_page + 1, ui.ctx());
                 }
             });
+        }
+    }
+
+    fn modpack_form(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.label(
+            egui::RichText::new(t(
+                "path to a .mrpack, CurseForge, MCBBS or server pack archive",
+            ))
+            .weak()
+            .small(),
+        );
+        ui.horizontal(|ui| {
+            ui.label(t("Modpack file:"));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.modpack_file)
+                    .id_salt("modpack_file")
+                    .desired_width(420.0),
+            );
+        });
+        ui.checkbox(
+            &mut self.modpack_with_optional,
+            t("Include optional files"),
+        );
+        ui.add_space(8.0);
+        if ui
+            .add_enabled(
+                !self.modpack_installing,
+                egui::Button::new(t("Install modpack")),
+            )
+            .clicked()
+        {
+            self.start_modpack_install(&ctx);
+        }
+        if self.modpack_installing {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                if let Some(progress) = &self.modpack_progress {
+                    ui.label(progress);
+                }
+            });
+        }
+        if let Some(notice) = &self.modpack_notice {
+            ui.label(egui::RichText::new(notice).color(egui::Color32::LIGHT_GREEN));
+        }
+        if let Some(error) = &self.modpack_error {
+            ui.label(egui::RichText::new(error).color(ui.visuals().error_fg_color));
         }
     }
 
@@ -1798,6 +1964,44 @@ impl App {
     }
 }
 
+/// Download a modpack from Modrinth and install it as a new instance.
+async fn install_modpack_from_modrinth(
+    project: &str,
+    game_version: &str,
+    loader: &str,
+    minecraft_dir: &Path,
+    java: &Path,
+) -> Result<modpack::InstallReport, String> {
+    let cache = config::cache_dir()
+        .map(|dir| dir.join("modpacks"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("lyys-modpacks"));
+    let archive = cache.join(format!("{}.mrpack", safe_file_name(project)));
+    let loader = (!loader.trim().is_empty()).then_some(loader);
+    modrinth::download_primary_file(project, game_version, loader, &archive)
+        .await
+        .map_err(|error| error.to_string())?;
+    let options = InstallOptions {
+        minecraft_dir,
+        java,
+        with_optional: false,
+    };
+    let result = modpack::install_file(&archive, &options, Arc::new(|_: PackProgress| {})).await;
+    let _ = std::fs::remove_file(&archive);
+    result.map_err(|error| error.to_string())
+}
+
+fn safe_file_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn mod_result(
     ui: &mut egui::Ui,
     hit: &ModSearchHit,
@@ -1916,6 +2120,7 @@ fn content_label(kind: ProjectType) -> &'static str {
         ProjectType::ResourcePack => t("Resource packs"),
         ProjectType::ShaderPack => t("Shader packs"),
         ProjectType::DataPack => t("Data packs"),
+        ProjectType::Modpack => t("Modpacks"),
     }
 }
 
@@ -2070,6 +2275,28 @@ impl eframe::App for App {
                     Task::Launch => self.launching = false,
                 },
                 Message::Progress(progress) => self.install_progress = Some(progress),
+                Message::ModpackProgress(line) => self.modpack_progress = Some(line),
+                Message::ModpackDone(result) => {
+                    self.modpack_installing = false;
+                    self.modpack_progress = None;
+                    self.mod_installing = None;
+                    match result {
+                        Ok(report) => {
+                            let version = report.version_id.clone();
+                            self.modpack_notice =
+                                Some(tf("modpack installed: {}", &[version.as_str()]));
+                            self.log.push(tf("modpack installed: {}", &[version.as_str()]));
+                            self.launch_version = version;
+                            self.scan_installed();
+                        }
+                        Err(error) => {
+                            let line =
+                                tf("modpack install failed: {}", &[error.as_str()]);
+                            self.modpack_error = Some(line.clone());
+                            self.log.push(line);
+                        }
+                    }
+                }
                 Message::Versions(result) => {
                     self.versions_loading = false;
                     match result {

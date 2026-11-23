@@ -30,6 +30,7 @@ pub enum ProjectType {
     ResourcePack,
     ShaderPack,
     DataPack,
+    Modpack,
 }
 
 impl ProjectType {
@@ -40,6 +41,7 @@ impl ProjectType {
             Self::ResourcePack => "resourcepack",
             Self::ShaderPack => "shader",
             Self::DataPack => "datapack",
+            Self::Modpack => "modpack",
         }
     }
 
@@ -50,6 +52,7 @@ impl ProjectType {
             Self::ResourcePack => "resourcepack",
             Self::ShaderPack => "shader",
             Self::DataPack => "datapack",
+            Self::Modpack => "modpack",
         }
     }
 }
@@ -314,6 +317,41 @@ pub async fn install_content(
         }],
         skipped: Vec::new(),
     })
+}
+
+/// Download the primary file of the newest compatible version of `project` to `dest`.
+///
+/// Used for modpacks: the archive is downloaded first and then installed by
+/// [`crate::core::modpack`].
+pub async fn download_primary_file(
+    project: &str,
+    game_version: &str,
+    loader: Option<&str>,
+    dest: &Path,
+) -> Result<(), ModrinthError> {
+    let client = client()?;
+    let versions = fetch_versions(&client, project, game_version, loader).await?;
+    let Some(version) = versions.into_iter().next() else {
+        return Err(ModrinthError::NoCompatibleVersion(project.to_owned()));
+    };
+    let mut files = version.files;
+    let file = match files.iter().position(|file| file.primary) {
+        Some(index) => files.remove(index),
+        None if files.is_empty() => return Err(ModrinthError::NoFile(project.to_owned())),
+        None => files.remove(0),
+    };
+    let bytes = client
+        .get(file.url.as_str())
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, bytes)?;
+    Ok(())
 }
 
 /// Latest compatible version of `project`, as `(version id, version number)`.
