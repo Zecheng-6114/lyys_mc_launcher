@@ -8,12 +8,12 @@ use tokio::runtime::Handle;
 
 use mc_launcher_core::loader::LoaderKind;
 use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
-use mc_launcher_core::utils::get_java_executable;
 
 use crate::core::auth::{AccountSession, Auth, SessionState};
 use crate::core::config::{self, InstanceConfig, LauncherConfig};
 use crate::core::i18n::{self, Language, t, tf};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
+use crate::core::java::{self, JavaRuntime};
 use crate::core::launch::{self, LaunchAccount, LaunchRequest};
 use crate::core::modrinth::{
     self, InstallOutcome, ModSearchHit, ModSearchRequest, ModSearchResult, ProjectType,
@@ -117,7 +117,10 @@ enum Message {
     TaskDone(Task),
     Progress(InstallProgress),
     Versions(Result<Vec<AvailableVersion>, String>),
-    LoaderVersions(Result<Vec<String>, String>),
+    LoaderVersions {
+        key: (LoaderChoice, String),
+        result: Result<Vec<String>, String>,
+    },
     ModSearch {
         page: u32,
         result: Result<ModSearchResult, String>,
@@ -133,6 +136,7 @@ enum Message {
         dir: PathBuf,
         updates: HashMap<String, (String, String)>,
     },
+    JavaVersions(Vec<JavaRuntime>),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -270,6 +274,9 @@ struct App {
     loader_versions_error: Option<String>,
     loader_versions_key: Option<(LoaderChoice, String)>,
     java_path: String,
+    /// Java runtimes from the last scan, shown in the settings page.
+    java_versions: Vec<JavaRuntime>,
+    java_scanning: bool,
     versions: Vec<AvailableVersion>,
     versions_loading: bool,
     versions_error: Option<String>,
@@ -330,11 +337,8 @@ impl App {
         } else {
             config.minecraft_dir.trim().to_owned()
         };
-        let java_path = if config.java_path.trim().is_empty() {
-            get_java_executable().unwrap_or_else(|| "java".to_owned())
-        } else {
-            config.java_path.trim().to_owned()
-        };
+        // 留空表示启动时按游戏版本自动匹配本机 Java
+        let java_path = config.java_path.trim().to_owned();
         let mut app = Self {
             auth: Arc::new(auth),
             handle,
@@ -353,6 +357,8 @@ impl App {
             loader_versions_error: None,
             loader_versions_key: None,
             java_path,
+            java_versions: Vec::new(),
+            java_scanning: false,
             versions: Vec::new(),
             versions_loading: false,
             versions_error: None,
@@ -390,6 +396,14 @@ impl App {
             logging_in: false,
             log: Vec::new(),
         };
+        // 先用上次缓存的版本列表，避免每次启动都要等网络
+        if let Some(versions) = install::cached_versions() {
+            if let Some(latest) = versions.iter().find(|entry| entry.kind == "release") {
+                app.install_version = latest.id.clone();
+            }
+            app.versions = versions;
+            app.versions_requested = true;
+        }
         app.reload_accounts();
         app.scan_installed();
         app
@@ -431,14 +445,31 @@ impl App {
         self.loader_versions_error = None;
         self.loader_versions.clear();
         let minecraft_version = self.install_version.trim().to_owned();
+        let key = (self.install_loader, minecraft_version.clone());
+        self.loader_versions_key = Some(key.clone());
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         self.handle.spawn_blocking(move || {
             let result = install::loader_versions(kind, &minecraft_version)
                 .map_err(|error| error.to_string());
-            let _ = tx.send(Message::LoaderVersions(result));
+            let _ = tx.send(Message::LoaderVersions { key, result });
             ctx.request_repaint();
         });
+    }
+
+    /// 优先使用本地缓存的加载器版本，没有缓存时才请求网络。
+    fn load_loader_versions(&mut self, ctx: &egui::Context) {
+        let Some(kind) = self.install_loader.kind() else {
+            return;
+        };
+        let minecraft_version = self.install_version.trim().to_owned();
+        if let Some(cached) = install::cached_loader_versions(kind, &minecraft_version) {
+            self.loader_versions = cached;
+            self.loader_versions_error = None;
+            self.loader_versions_loading = false;
+            return;
+        }
+        self.reload_loader_versions(ctx);
     }
 
     fn scan_installed(&mut self) {
@@ -509,7 +540,8 @@ impl App {
     }
 
     /// Java executable for `instance`: its own config, else the global one.
-    fn effective_java(&self, instance: &str) -> PathBuf {
+    /// `None` means no Java was configured and one is matched at launch time.
+    fn effective_java(&self, instance: &str) -> Option<PathBuf> {
         let configured = match self.config.instances.get(instance) {
             Some(config) if !config.use_global => config.java_path.trim(),
             _ => "",
@@ -519,11 +551,39 @@ impl App {
         } else {
             configured
         };
-        if path.is_empty() {
-            PathBuf::from("java")
-        } else {
-            PathBuf::from(path)
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    }
+
+    /// Java executables the launcher knows about: the saved list plus this scan.
+    fn java_candidates(&self) -> Vec<String> {
+        let mut candidates = self.config.java_versions.clone();
+        for runtime in &self.java_versions {
+            let path = runtime.executable.display().to_string();
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
         }
+        let selected = self.java_path.trim();
+        if !selected.is_empty() && !candidates.iter().any(|path| path == selected) {
+            candidates.push(selected.to_owned());
+        }
+        candidates
+    }
+
+    /// Scan this machine for Java runtimes on a background thread.
+    fn scan_java(&mut self, ctx: egui::Context) {
+        if self.java_scanning {
+            return;
+        }
+        self.java_scanning = true;
+        let dir = PathBuf::from(self.minecraft_dir.trim());
+        let known = self.java_candidates();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let runtimes = java::discover(&dir, &known);
+            let _ = tx.send(Message::JavaVersions(runtimes));
+            ctx.request_repaint();
+        });
     }
 
     /// Isolation that applies to the current mods target.
@@ -590,6 +650,7 @@ impl App {
     fn save_config(&mut self) {
         self.config.minecraft_dir = self.minecraft_dir.trim().to_owned();
         self.config.java_path = self.java_path.trim().to_owned();
+        self.config.java_versions = self.java_candidates();
         self.config.isolate = self.isolate;
         self.config.language = i18n::current().code().to_owned();
         match self.config.save() {
@@ -597,6 +658,23 @@ impl App {
                 let path = path.display().to_string();
                 self.config_status = Some(tf("saved to {}", &[path.as_str()]));
                 self.scan_installed();
+            }
+            Err(error) => {
+                let error = error.to_string();
+                self.config_status = Some(tf("save failed: {}", &[error.as_str()]));
+            }
+        }
+    }
+
+    /// Save the Java choice (radio selection or scan results) right away,
+    /// leaving other unsaved settings untouched.
+    fn persist_java(&mut self) {
+        self.config.java_path = self.java_path.trim().to_owned();
+        self.config.java_versions = self.java_candidates();
+        match self.config.save() {
+            Ok(path) => {
+                let path = path.display().to_string();
+                self.config_status = Some(tf("saved to {}", &[path.as_str()]));
             }
             Err(error) => {
                 let error = error.to_string();
@@ -861,12 +939,21 @@ impl App {
         self.launching = true;
         let dir = PathBuf::from(self.minecraft_dir.trim());
         let java = self.effective_java(&version);
+        let java_candidates = self.java_candidates();
         let isolate = self.effective_isolate(&version);
         let auth = Arc::clone(&self.auth);
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         self.handle.spawn(async move {
-            let result = launch_task(&auth, &dir, &version, &java, isolate).await;
+            let result = launch_task(
+                &auth,
+                &dir,
+                &version,
+                java.as_deref(),
+                &java_candidates,
+                isolate,
+            )
+            .await;
             let line = match result {
                 Ok(pid) => tf(
                     "launched {}, pid {}",
@@ -1001,7 +1088,7 @@ impl App {
             && !self.loader_versions_loading
         {
             self.loader_versions_key = Some(loader_key);
-            self.reload_loader_versions(ui.ctx());
+            self.load_loader_versions(ui.ctx());
         }
         ui.horizontal(|ui| {
             ui.label(t("Version:"));
@@ -1106,18 +1193,6 @@ impl App {
                         }
                     });
             }
-            if matches!(
-                self.install_loader,
-                LoaderChoice::Forge | LoaderChoice::NeoForge
-            ) {
-                ui.horizontal(|ui| {
-                    ui.label(t("Java:"));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.java_path).id_salt("install_java"),
-                    );
-                    ui.label(t("used by the loader installer"));
-                });
-            }
         }
         ui.horizontal(|ui| {
             ui.label(t("Minecraft dir:"));
@@ -1185,14 +1260,16 @@ impl App {
         }
         let selected = self.launch_version.trim().to_owned();
         if !selected.is_empty() {
-            let java = self.effective_java(&selected);
             let isolate = self.effective_isolate(&selected);
             let source = if self.instance_uses_global(&selected) {
                 t("global")
             } else {
                 t("instance")
             };
-            let java = java.display().to_string();
+            let java = self
+                .effective_java(&selected)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| t("auto (match the game version)").to_owned());
             let isolation = if isolate { t("on") } else { t("off") };
             ui.label(
                 egui::RichText::new(tf(
@@ -1606,13 +1683,36 @@ impl App {
                         );
                     });
                     ui.horizontal(|ui| {
-                        ui.label(t("Java path:"));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.java_path)
-                                .id_salt("settings_java")
-                                .hint_text(t("auto-detect")),
-                        );
+                        ui.label(t("Installed Java"));
+                        if ui
+                            .add_enabled(!self.java_scanning, egui::Button::new(t("Scan")))
+                            .clicked()
+                        {
+                            self.scan_java(ui.ctx().clone());
+                        }
+                        if self.java_scanning {
+                            ui.spinner();
+                        }
                     });
+                    let selected = self.java_path.trim().to_owned();
+                    let mut chosen: Option<String> = None;
+                    if ui
+                        .radio(selected.is_empty(), t("auto (match the game version)"))
+                        .clicked()
+                    {
+                        chosen = Some(String::new());
+                    }
+                    for runtime in &self.java_versions {
+                        let path = runtime.executable.display().to_string();
+                        let label = format!("Java {}  {}", runtime.version, path);
+                        if ui.radio(selected == path, label).clicked() {
+                            chosen = Some(path);
+                        }
+                    }
+                    if let Some(path) = chosen {
+                        self.java_path = path;
+                        self.persist_java();
+                    }
                     ui.checkbox(&mut self.isolate, t("Version isolation"));
                 });
                 ui.add_space(10.0);
@@ -1841,7 +1941,8 @@ async fn launch_task(
     auth: &Auth,
     minecraft_dir: &Path,
     version: &str,
-    java: &Path,
+    java: Option<&Path>,
+    java_candidates: &[String],
     isolate: bool,
 ) -> Result<u32, String> {
     let session = auth
@@ -1854,6 +1955,7 @@ async fn launch_task(
             version,
             LaunchAccount::Offline(&session.profile),
             java,
+            java_candidates,
             isolate,
         )
     } else {
@@ -1866,6 +1968,7 @@ async fn launch_task(
             version,
             LaunchAccount::Microsoft(&token),
             java,
+            java_candidates,
             isolate,
         )
     }
@@ -1875,14 +1978,16 @@ fn spawn_game(
     minecraft_dir: &Path,
     version: &str,
     account: LaunchAccount<'_>,
-    java: &Path,
+    java: Option<&Path>,
+    java_candidates: &[String],
     isolate: bool,
 ) -> Result<u32, String> {
     let child = launch::launch(LaunchRequest {
         minecraft_dir,
         version_id: version,
         account,
-        java: Some(java),
+        java,
+        java_candidates,
         game_dir: None,
         isolated: isolate,
     })
@@ -1969,6 +2074,7 @@ impl eframe::App for App {
                     self.versions_loading = false;
                     match result {
                         Ok(versions) => {
+                            install::store_versions(&versions);
                             self.versions = versions;
                             self.versions_error = None;
                             if self.install_version.trim().is_empty() {
@@ -1982,16 +2088,24 @@ impl eframe::App for App {
                         Err(error) => self.versions_error = Some(error),
                     }
                 }
-                Message::LoaderVersions(result) => {
-                    self.loader_versions_loading = false;
-                    match result {
-                        Ok(versions) => {
+                Message::LoaderVersions { key, result } => match result {
+                    Ok(versions) => {
+                        if let Some(kind) = key.0.kind() {
+                            install::store_loader_versions(kind, &key.1, &versions);
+                        }
+                        if self.loader_versions_key.as_ref() == Some(&key) {
                             self.loader_versions = versions;
                             self.loader_versions_error = None;
+                            self.loader_versions_loading = false;
                         }
-                        Err(error) => self.loader_versions_error = Some(error),
                     }
-                }
+                    Err(error) => {
+                        if self.loader_versions_key.as_ref() == Some(&key) {
+                            self.loader_versions_error = Some(error);
+                            self.loader_versions_loading = false;
+                        }
+                    }
+                },
                 Message::ModSearch { page, result } => {
                     self.mod_searching = false;
                     match result {
@@ -2087,6 +2201,11 @@ impl eframe::App for App {
                         }
                         Err(error) => self.mod_error = Some(error),
                     }
+                }
+                Message::JavaVersions(runtimes) => {
+                    self.java_versions = runtimes;
+                    self.java_scanning = false;
+                    self.persist_java();
                 }
                 Message::ModUpdates { dir, updates } => {
                     if dir.display().to_string() == self.installed_mods_dir {

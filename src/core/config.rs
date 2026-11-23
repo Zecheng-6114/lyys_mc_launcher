@@ -49,6 +49,9 @@ pub struct LauncherConfig {
     /// Java executable; empty means auto-detect.
     #[serde(default)]
     pub java_path: String,
+    /// Java executables remembered from earlier scans, used as extra candidates.
+    #[serde(default)]
+    pub java_versions: Vec<String>,
     #[serde(default)]
     pub isolate: bool,
     /// Language code (`en_us`, `zh_cn`, `zh_tw`, `ja_jp`); empty means auto-detect.
@@ -110,6 +113,16 @@ impl LauncherConfig {
 /// Location of the configuration file.
 pub fn path() -> Result<PathBuf, ConfigError> {
     Ok(data_root()?.join(CONFIG_FILE))
+}
+
+/// Directory holding cached remote data such as version lists.
+pub fn cache_dir() -> Result<PathBuf, ConfigError> {
+    Ok(data_root()?.join("cache"))
+}
+
+/// Directory for logs produced by external tools such as loader installers.
+pub fn log_dir() -> Result<PathBuf, ConfigError> {
+    Ok(data_root()?.join("log"))
 }
 
 fn default_true() -> bool {

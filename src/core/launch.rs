@@ -7,6 +7,7 @@ use mc_launcher_core::launcher::Launcher;
 use thiserror::Error;
 
 use super::auth::{GameToken, Profile};
+use super::java;
 
 const LAUNCHER_NAME: &str = "LYYSML";
 
@@ -20,6 +21,16 @@ pub enum LaunchError {
     Spawn(#[source] std::io::Error),
     #[error("Java check failed: {0}")]
     Java(String),
+    #[error(
+        "this version needs Java {required}, but the configured Java is {actual}; \
+         install Java {required} or point the settings to it"
+    )]
+    JavaMismatch { required: u32, actual: u32 },
+    #[error(
+        "this version needs Java {required}, but no compatible Java was found; \
+         install it or set its path in the settings"
+    )]
+    JavaMissing { required: u32 },
 }
 
 pub enum LaunchAccount<'a> {
@@ -32,23 +43,54 @@ pub struct LaunchRequest<'a> {
     pub version_id: &'a str,
     pub account: LaunchAccount<'a>,
     pub java: Option<&'a Path>,
+    /// Extra Java executables remembered by the user, probed when matching.
+    pub java_candidates: &'a [String],
     pub game_dir: Option<&'a Path>,
     pub isolated: bool,
 }
 
 pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
-    if let Some(java) = request.java {
-        ensure_java_available(java)?;
-    }
     // 类路径和 natives 路径都基于 Minecraft 目录；如果目录是相对路径，
     // 而工作目录又被切换到游戏目录，Java 会按新工作目录解析这些相对路径导致找不到主类。
     let minecraft_dir =
         std::path::absolute(request.minecraft_dir).map_err(LaunchError::Absolute)?;
     let launcher = Launcher::new(&minecraft_dir);
     let version = launcher.load_version(request.version_id)?;
+    let required = version
+        .java_version
+        .as_ref()
+        .and_then(|java| u32::try_from(java.major_version).ok());
+    let java = match (request.java, required) {
+        (Some(java), Some(required)) => {
+            ensure_java_available(java)?;
+            match java::major_of(java) {
+                // 配置的 Java 能运行该版本，尊重用户选择
+                Some(actual) if java::compatible(required, actual) => Some(java.to_path_buf()),
+                // 配置的 Java 与版本要求不兼容（例如用 Java 27 启动 1.12.2）时自动换成本机匹配的 Java
+                Some(actual) => match java::select(&minecraft_dir, required, request.java_candidates) {
+                    Some(runtime) => Some(runtime.executable),
+                    None => {
+                        return Err(LaunchError::JavaMismatch { required, actual });
+                    }
+                },
+                None => Some(java.to_path_buf()),
+            }
+        }
+        (Some(java), None) => {
+            ensure_java_available(java)?;
+            Some(java.to_path_buf())
+        }
+        // 未指定 Java 时按版本 JSON 的要求挑选，缺失时直接说明而不是带着错误的 Java 启动
+        (None, Some(required)) => match java::select(&minecraft_dir, required, request.java_candidates) {
+            Some(runtime) => Some(runtime.executable),
+            None => return Err(LaunchError::JavaMissing { required }),
+        },
+        // 版本 JSON 没有 javaVersion 信息时保留原有行为，交给 PATH 上的 java
+        (None, None) => None,
+    };
     let options = LaunchOptions {
         account: core_account(&request.account),
-        java_executable: request.java.map(Path::to_path_buf),
+        java_executable: java,
         game_directory: Some(game_directory(&minecraft_dir, &request)?),
         launcher_name: LAUNCHER_NAME.to_owned(),
         launcher_version: env!("CARGO_PKG_VERSION").to_owned(),

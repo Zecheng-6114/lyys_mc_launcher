@@ -9,6 +9,7 @@ use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
 use crate::core::config::{self, ConfigError, InstanceConfig, LauncherConfig};
 use crate::core::i18n::{self, t, tf};
 use crate::core::install;
+use crate::core::java;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
 use crate::core::modrinth::{self, ModrinthError, ModSearchRequest};
 use crate::gui;
@@ -51,6 +52,8 @@ enum Command {
     Account(AccountArgs),
     Install(InstallArgs),
     Launch(LaunchArgs),
+    /// List the Java runtimes found on this machine.
+    Java,
     Search(SearchArgs),
     Download(DownloadArgs),
     Config(ConfigArgs),
@@ -215,6 +218,7 @@ pub async fn run() -> Result<(), CliError> {
         Some(Command::Account(args)) => run_account(args.action).await,
         Some(Command::Install(args)) => run_install(args).await,
         Some(Command::Launch(args)) => run_launch(args).await,
+        Some(Command::Java) => run_java_list(),
         Some(Command::Search(args)) => run_search(args).await,
         Some(Command::Download(args)) => run_download(args).await,
         Some(Command::Config(args)) => run_config(args.action),
@@ -379,6 +383,7 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
         version_id: &args.version,
         account,
         java: java.as_deref(),
+        java_candidates: &config.java_versions,
         game_dir: args.game_dir.as_deref(),
         isolated: isolate,
     })?;
@@ -390,6 +395,29 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
     let status = child.wait().map_err(AuthError::from)?;
     if !status.success() {
         return Err(CliError::Game(status));
+    }
+    Ok(())
+}
+
+/// Print the Java runtimes found on this machine, marking the configured one.
+fn run_java_list() -> Result<(), CliError> {
+    let config = LauncherConfig::load()?;
+    let minecraft_dir = resolve_minecraft_dir(None, &config)?;
+    let selected = config.java_path.trim();
+    let runtimes = java::discover(&minecraft_dir, &config.java_versions);
+    println!("{}", t("Installed Java"));
+    if runtimes.is_empty() {
+        println!("{}", t("no Java found"));
+        return Ok(());
+    }
+    for runtime in &runtimes {
+        let path = runtime.executable.display().to_string();
+        let marker = if path == selected {
+            format!(" {}", t("(selected)"))
+        } else {
+            String::new()
+        };
+        println!("Java {}{}  {}", runtime.version, marker, path);
     }
     Ok(())
 }
@@ -520,12 +548,18 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 config.minecraft_dir.trim()
             };
             let java = if config.java_path.trim().is_empty() {
-                t("(auto-detect)")
+                t("auto (match the game version)")
             } else {
                 config.java_path.trim()
             };
             println!("{}", tf("minecraft dir: {}", &[dir]));
             println!("{}", tf("java path: {}", &[java]));
+            if !config.java_versions.is_empty() {
+                println!("{}", t("known Java:"));
+                for path in &config.java_versions {
+                    println!("  {path}");
+                }
+            }
             println!("{}", tf("version isolation: {}", &[yes_no(config.isolate)]));
             if config.instances.is_empty() {
                 println!("{}", t("instance overrides: none"));

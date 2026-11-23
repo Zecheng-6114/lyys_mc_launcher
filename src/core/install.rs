@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -11,7 +12,7 @@ use mc_launcher_core::loader::{LoaderKind, fabric, forge, neoforge, quilt};
 use mc_launcher_core::net::download::{DownloadPlan, DownloadTask, execute_plan};
 use mc_launcher_core::net::http;
 use mc_launcher_core::progress::ProgressEvent;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::i18n::tf;
 
@@ -20,6 +21,8 @@ const VERSION_MANIFEST_URL: &str =
 const REQUEST_TIMEOUT_SECONDS: u64 = 30;
 const FABRIC_GAME_LOADERS_URL: &str = "https://meta.fabricmc.net/v2/versions/loader";
 const QUILT_GAME_LOADERS_URL: &str = "https://meta.quiltmc.org/v3/versions/loader";
+const VERSIONS_CACHE: &str = "versions.json";
+const LOADER_VERSIONS_CACHE: &str = "loader_versions.json";
 
 #[derive(Deserialize)]
 struct GameLoaderEntry {
@@ -32,7 +35,7 @@ struct GameLoaderVersion {
 }
 
 /// 远端版本清单里的一条记录。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AvailableVersion {
     pub id: String,
     pub kind: String,
@@ -70,6 +73,59 @@ pub async fn available_versions() -> Result<Vec<AvailableVersion>, reqwest::Erro
             kind: entry.kind,
         })
         .collect())
+}
+
+/// 上次成功拉取并缓存的版本清单。
+pub fn cached_versions() -> Option<Vec<AvailableVersion>> {
+    read_cache(VERSIONS_CACHE)
+}
+
+/// 记住刚拉取到的版本清单，供下次启动直接使用。
+pub fn store_versions(versions: &[AvailableVersion]) {
+    write_cache(VERSIONS_CACHE, versions);
+}
+
+/// 某个加载器在某个游戏版本下缓存的版本列表。
+pub fn cached_loader_versions(kind: LoaderKind, minecraft_version: &str) -> Option<Vec<String>> {
+    let cache: BTreeMap<String, Vec<String>> = read_cache(LOADER_VERSIONS_CACHE)?;
+    cache
+        .get(&loader_cache_key(kind, minecraft_version))
+        .cloned()
+}
+
+/// 记住刚拉取到的加载器版本列表；空列表通常代表网络或接口异常，不缓存。
+pub fn store_loader_versions(kind: LoaderKind, minecraft_version: &str, versions: &[String]) {
+    if versions.is_empty() {
+        return;
+    }
+    let mut cache: BTreeMap<String, Vec<String>> =
+        read_cache(LOADER_VERSIONS_CACHE).unwrap_or_default();
+    cache.insert(
+        loader_cache_key(kind, minecraft_version),
+        versions.to_vec(),
+    );
+    write_cache(LOADER_VERSIONS_CACHE, &cache);
+}
+
+fn loader_cache_key(kind: LoaderKind, minecraft_version: &str) -> String {
+    format!("{kind:?}/{minecraft_version}").to_lowercase()
+}
+
+fn read_cache<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
+    let path = super::config::cache_dir().ok()?.join(name);
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn write_cache<T: Serialize + ?Sized>(name: &str, value: &T) {
+    let Ok(dir) = super::config::cache_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(bytes) = serde_json::to_vec(value) {
+        let _ = std::fs::write(dir.join(name), bytes);
+    }
 }
 
 /// 列出本地 `versions` 目录下已安装的实例（存在同名版本 JSON 才算）。
@@ -162,6 +218,35 @@ pub fn install_loader_with_reporter(
     }
 }
 
+/// 安装器会在当前工作目录写 `<jar 文件名>.log`，统一挪到数据目录的 `log/` 下。
+fn archive_installer_log(installer_path: &Path) {
+    let Some(name) = installer_path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let log_name = format!("{name}.log");
+    let source = Path::new(&log_name);
+    if !source.is_file() {
+        return;
+    }
+    let Ok(dir) = super::config::log_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(source, dir.join(log_name));
+}
+
+/// Forge / NeoForge 官方安装器要求目标目录里已有启动器档案文件，缺失时补一个空的。
+fn ensure_launcher_profiles(minecraft_dir: &Path) {
+    let path = minecraft_dir.join("launcher_profiles.json");
+    if path.is_file() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(minecraft_dir);
+    let _ = std::fs::write(path, br#"{"profiles":{}}"#);
+}
+
 /// 拉取某个加载器的可选版本；Forge/NeoForge 只保留匹配当前 Minecraft 版本的条目。
 pub fn loader_versions(
     kind: LoaderKind,
@@ -228,6 +313,7 @@ fn install_with_installer(
     reporter: &mut dyn FnMut(InstallProgress),
 ) -> Result<InstallResult, mc_launcher_core::LauncherError> {
     ensure_java_available(java_executable)?;
+    ensure_launcher_profiles(minecraft_dir);
     let mut downloaded = 0_u64;
     let mut skipped = 0_u64;
     let mut current: Option<String> = None;
@@ -292,12 +378,14 @@ fn install_with_installer(
         &mut reporter_bridge,
     )?;
 
-    run_loader_installer(&InstallerInvocation {
+    let result = run_loader_installer(&InstallerInvocation {
         loader: kind,
         java_executable: java_executable.to_path_buf(),
-        installer_path,
+        installer_path: installer_path.clone(),
         minecraft_dir: minecraft_dir.to_path_buf(),
-    })?;
+    });
+    archive_installer_log(&installer_path);
+    result?;
 
     let version_id = match kind {
         LoaderKind::Forge => forge::forge_installed_version_id(&loader_version)?,
