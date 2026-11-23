@@ -165,11 +165,11 @@ impl PackProgress {
     /// 渲染成一行人类可读的进度文本，供 GUI 与 CLI 共用。
     pub fn describe(&self) -> String {
         match self.stage {
-            "loader" => format!("{} {}", t("installing loader"), self.done),
+            "loader" => format!("{} {}", t("modpack.step.loader"), self.done),
             "files" => {
                 let mut line = format!(
                     "{} {}/{} · {}/{} · {}/s",
-                    t("downloading files"),
+                    t("modpack.step.download"),
                     self.done,
                     self.total,
                     human_bytes(self.bytes_done),
@@ -182,7 +182,7 @@ impl PackProgress {
                 }
                 line
             }
-            "overrides" => t("extracting overrides").to_owned(),
+            "overrides" => t("modpack.step.overrides").to_owned(),
             _ => String::new(),
         }
     }
@@ -209,17 +209,17 @@ impl InstallTimings {
     /// 单行汇总，便于写进日志。
     pub fn summary(&self) -> String {
         [
-            ("manifest parsed in {}", self.manifest),
-            ("metadata resolved in {}", self.metadata),
-            ("Minecraft installed in {}", self.minecraft),
-            ("loader installed in {}", self.loader),
-            ("files downloaded in {}", self.download),
-            ("overrides extracted in {}", self.overrides),
+            ("modpack.timing.manifest", self.manifest),
+            ("modpack.timing.metadata", self.metadata),
+            ("modpack.timing.minecraft", self.minecraft),
+            ("modpack.timing.loader", self.loader),
+            ("modpack.timing.download", self.download),
+            ("modpack.timing.overrides", self.overrides),
         ]
         .into_iter()
         .map(|(key, duration)| {
             let value = format!("{:.1}s", duration.as_secs_f64());
-            tf(key, &[value.as_str()])
+            tf(key, &[("duration", value.as_str())])
         })
         .collect::<Vec<_>>()
         .join(" · ")
@@ -260,7 +260,7 @@ pub async fn install_file(
     let detected = detect(path)?;
     let (manifest, mut timings) = load_manifest(path, &detected).await?;
     if manifest.game_version.trim().is_empty() {
-        return Err(ModpackError::Parse(t("modpack has no Minecraft version").to_owned()));
+        return Err(ModpackError::Parse(t("modpack.error.no_version").to_owned()));
     }
 
     // 先安装对应版本与模组加载器，得到版本 id；实例的隔离目录就是它的游戏目录
@@ -444,10 +444,9 @@ pub fn detect(path: &Path) -> Result<Detected, ModpackError> {
         }
     }
 
-    Err(ModpackError::Parse(t(
-        "this archive is not a supported modpack",
-    )
-    .to_owned()))
+    Err(ModpackError::Parse(
+        t("modpack.error.unsupported").to_owned(),
+    ))
 }
 
 /// 读取并解析清单；顺带记录“解析清单”和“解析元数据”两段耗时。

@@ -10,21 +10,21 @@ use crate::gui::app::{App, Message, Task};
 
 impl App {
     pub(crate) fn launch_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t("Launch instance"));
+        ui.heading(t("nav.launch"));
         ui.horizontal(|ui| {
-            ui.label(t("Minecraft dir:"));
+            ui.label(t("settings.minecraft_dir"));
             ui.add(egui::TextEdit::singleline(&mut self.minecraft_dir).id_salt("launch_dir"));
-            if ui.button(t("Scan installed")).clicked() {
+            if ui.button(t("launch.scan")).clicked() {
                 self.scan_installed();
             }
         });
         if let Some(error) = &self.installed_error {
-            ui.label(tf("scan failed: {}", &[error.as_str()]));
+            ui.label(tf("error.scan_failed", &[("error", error.as_str())]));
         }
         if self.installed.is_empty() {
-            ui.label(t("no installed instance found, install one first"));
+            ui.label(t("launch.none"));
         } else {
-            ui.label(t("Installed instances:"));
+            ui.label(t("launch.instances"));
             egui::ScrollArea::vertical()
                 .id_salt("launch_instances")
                 .max_height(160.0)
@@ -47,19 +47,19 @@ impl App {
         if !selected.is_empty() {
             let isolate = self.effective_isolate(&selected);
             let source = if self.instance_uses_global(&selected) {
-                t("global")
+                t("common.global")
             } else {
-                t("instance")
+                t("common.instance")
             };
             let java = self
                 .effective_java(&selected)
                 .map(|path| path.display().to_string())
-                .unwrap_or_else(|| t("auto (match the game version)").to_owned());
-            let isolation = if isolate { t("on") } else { t("off") };
+                .unwrap_or_else(|| t("settings.java.auto").to_owned());
+            let isolation = if isolate { t("common.on") } else { t("common.off") };
             ui.label(
                 egui::RichText::new(tf(
-                    "Java: {}  ·  version isolation: {}  ({} config, edit in Settings)",
-                    &[java.as_str(), isolation, source],
+                    "launch.java_summary",
+                    &[("java", java.as_str()), ("isolation", isolation), ("source", source)],
                 ))
                 .weak()
                 .small(),
@@ -70,7 +70,7 @@ impl App {
             if ui
                 .add_enabled(
                     !self.launching && !self.launch_version.trim().is_empty(),
-                    egui::Button::new(t("Launch")),
+                    egui::Button::new(t("common.launch")),
                 )
                 .clicked()
             {
@@ -86,7 +86,7 @@ impl App {
         let version = self.launch_version.trim().to_owned();
         if version.is_empty() {
             self.log
-                .push(t("select an installed instance first").to_owned());
+                .push(t("launch.select_first").to_owned());
             return;
         }
         self.launching = true;
@@ -109,12 +109,12 @@ impl App {
             .await;
             let line = match result {
                 Ok(pid) => tf(
-                    "launched {}, pid {}",
-                    &[version.as_str(), pid.to_string().as_str()],
+                    "cli.launch.launched",
+                    &[("name", version.as_str()), ("pid", pid.to_string().as_str())],
                 ),
                 Err(error) => {
                     let error = error.to_string();
-                    tf("launch failed: {}", &[error.as_str()])
+                    tf("error.launch_failed", &[("error", error.as_str())])
                 }
             };
             let _ = tx.send(Message::Log(line));

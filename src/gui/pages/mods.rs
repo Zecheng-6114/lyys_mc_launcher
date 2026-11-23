@@ -17,11 +17,11 @@ use crate::gui::components::buttons::mod_result;
 
 impl App {
     pub(crate) fn mods_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t("Search content"));
-        ui.label(egui::RichText::new(t("Powered by Modrinth")).weak());
+        ui.heading(t("content.search"));
+        ui.label(egui::RichText::new(t("content.powered_by")).weak());
         let can_switch_type = self.mod_installing.is_none();
         ui.horizontal(|ui| {
-            ui.label(t("Type:"));
+            ui.label(t("content.type"));
             ui.add_enabled_ui(can_switch_type, |ui| {
                 for kind in [
                     ProjectType::Mod,
@@ -46,17 +46,17 @@ impl App {
             });
         });
         ui.horizontal(|ui| {
-            ui.label(t("Query:"));
+            ui.label(t("content.query"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.mod_query)
                     .id_salt("mod_query")
-                    .hint_text(t("e.g. sodium"))
+                    .hint_text(t("content.query_hint"))
                     .desired_width(220.0),
             );
             let submitted =
                 response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if ui
-                .add_enabled(!self.mod_searching, egui::Button::new(t("Search")))
+                .add_enabled(!self.mod_searching, egui::Button::new(t("common.search")))
                 .clicked()
                 || submitted
             {
@@ -67,19 +67,19 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            ui.label(t("Minecraft:"));
+            ui.label(t("content.minecraft"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.mod_minecraft_version)
                     .id_salt("mod_minecraft_version")
-                    .hint_text(t("any"))
+                    .hint_text(t("common.any_lower"))
                     .desired_width(100.0),
             );
             if self.mod_kind == ProjectType::Mod || self.mod_kind == ProjectType::Modpack {
-                ui.label(t("Loader:"));
+                ui.label(t("install.loader"));
                 egui::ComboBox::from_id_salt("mod_loader")
-                    .selected_text(self.mod_loader.map(loader_label).unwrap_or(t("Any")))
+                    .selected_text(self.mod_loader.map(loader_label).unwrap_or(t("common.any")))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.mod_loader, None, t("Any"));
+                        ui.selectable_value(&mut self.mod_loader, None, t("common.any"));
                         for kind in [
                             LoaderKind::Fabric,
                             LoaderKind::Quilt,
@@ -95,9 +95,9 @@ impl App {
                     });
             }
             if self.mod_kind == ProjectType::DataPack {
-                ui.label(t("World:"));
+                ui.label(t("content.world"));
                 let selected = if self.mod_datapack_world.is_empty() {
-                    t("pick…").to_owned()
+                    t("common.pick").to_owned()
                 } else {
                     self.mod_datapack_world.clone()
                 };
@@ -105,7 +105,7 @@ impl App {
                     .selected_text(selected)
                     .show_ui(ui, |ui| {
                         if self.datapack_worlds.is_empty() {
-                            ui.label(t("no world found"));
+                            ui.label(t("content.world_none"));
                         }
                         for world in &self.datapack_worlds {
                             ui.selectable_value(&mut self.mod_datapack_world, world.clone(), world);
@@ -113,10 +113,10 @@ impl App {
                     });
             }
             if !self.installed.is_empty() && self.mod_kind != ProjectType::Modpack {
-                ui.label(t("From instance:"));
+                ui.label(t("content.from_instance"));
                 let mut picked: Option<(String, Option<String>, Option<&'static str>)> = None;
                 egui::ComboBox::from_id_salt("mod_instance")
-                    .selected_text(self.mod_instance_id.as_deref().unwrap_or(t("pick…")))
+                    .selected_text(self.mod_instance_id.as_deref().unwrap_or(t("common.pick")))
                     .show_ui(ui, |ui| {
                         for instance in &self.installed {
                             let label = match (instance.loader, &instance.game_version) {
@@ -156,7 +156,7 @@ impl App {
             }
         });
         if let Some(error) = &self.mod_error {
-            ui.label(tf("error: {}", &[error.as_str()]));
+            ui.label(tf("error.prefix", &[("message", error.as_str())]));
         }
         if let Some(notice) = &self.mod_notice {
             ui.label(notice);
@@ -179,32 +179,33 @@ impl App {
                 self.start_update_check(ui.ctx(), &target_dir, self.mod_kind);
             }
             let isolated_suffix = if self.mods_isolate() {
-                t(" (isolated)")
+                t("content.isolated_suffix")
             } else {
                 ""
             };
             let target = target_dir.display().to_string();
             ui.label(
-                egui::RichText::new(tf("target: {}{}", &[target.as_str(), isolated_suffix]))
+                egui::RichText::new(tf(
+                    "content.target",
+                    &[("dir", target.as_str()), ("suffix", isolated_suffix)],
+                ))
                     .weak()
                     .small(),
             );
         }
         if self.mod_results.is_empty() {
             if !self.mod_searching && self.mod_error.is_none() {
-                ui.label(t(
-                    "enter a query, optionally filter by Minecraft version and loader",
-                ));
+                ui.label(t("content.search_hint"));
             }
         } else {
             ui.horizontal(|ui| {
                 let total = self.mod_total.to_string();
                 let shown = self.mod_results.len().to_string();
                 ui.label(tf(
-                    "{} results (showing {})",
-                    &[total.as_str(), shown.as_str()],
+                    "content.results_showing",
+                    &[("total", total.as_str()), ("shown", shown.as_str())],
                 ));
-                if ui.small_button(t("Reload icons")).clicked() {
+                if ui.small_button(t("content.reload_icons")).clicked() {
                     ui.ctx().forget_all_images();
                 }
             });
@@ -220,23 +221,21 @@ impl App {
                 && (!needs_loader || self.mod_loader.is_some());
             if !target_ready {
                 ui.label(
-                    egui::RichText::new(t(
-                        "version isolation is on: pick an instance to install content into",
-                    ))
-                    .weak()
-                    .small(),
+                    egui::RichText::new(t("content.need_instance_for_content"))
+                        .weak()
+                        .small(),
                 );
             } else if !world_ready {
                 ui.label(
-                    egui::RichText::new(t("pick a world to install data packs into"))
+                    egui::RichText::new(t("content.pick_world"))
                         .weak()
                         .small(),
                 );
             } else if !filters_ready {
                 let hint = if needs_loader {
-                    t("set a Minecraft version and loader to install mods")
+                    t("content.need_version_loader")
                 } else {
-                    t("set a Minecraft version to install content")
+                    t("content.need_version")
                 };
                 ui.label(egui::RichText::new(hint).weak().small());
             }
@@ -350,7 +349,7 @@ impl App {
                 if ui
                     .add_enabled(
                         self.mod_page > 1 && !self.mod_searching,
-                        egui::Button::new(t("Previous")),
+                        egui::Button::new(t("common.previous")),
                     )
                     .clicked()
                 {
@@ -358,11 +357,11 @@ impl App {
                 }
                 let page = self.mod_page.to_string();
                 let pages = total_pages.to_string();
-                ui.label(tf("Page {} / {}", &[page.as_str(), pages.as_str()]));
+                ui.label(tf("content.page", &[("page", page.as_str()), ("pages", pages.as_str())]));
                 if ui
                     .add_enabled(
                         self.mod_page < total_pages && !self.mod_searching,
-                        egui::Button::new(t("Next")),
+                        egui::Button::new(t("common.next")),
                     )
                     .clicked()
                 {
@@ -536,8 +535,8 @@ impl App {
             Ok(()) => removed += 1,
             Err(error) => {
                 self.mod_error = Some(tf(
-                    "failed to remove {}: {}",
-                    &[record.filename.as_str(), error.to_string().as_str()],
+                    "error.content_remove",
+                    &[("name", record.filename.as_str()), ("error", error.to_string().as_str())],
                 ))
             }
         }
@@ -546,8 +545,8 @@ impl App {
         if self.mod_error.is_none() {
             let removed = removed.to_string();
             self.mod_notice = Some(tf(
-                "uninstalled {}, removed {} file(s)",
-                &[record.filename.as_str(), removed.as_str()],
+                "content.uninstalled",
+                &[("name", record.filename.as_str()), ("count", removed.as_str())],
             ));
         }
     }
@@ -588,13 +587,13 @@ impl App {
                 if let Err(error) = std::fs::write(dir.join(Self::manifest_file(kind)), text) {
                     let error = error.to_string();
                     self.log
-                        .push(tf("failed to write content manifest: {}", &[error.as_str()]));
+                        .push(tf("error.manifest_write", &[("error", error.as_str())]));
                 }
             }
             Err(error) => {
                 let error = error.to_string();
                 self.log
-                    .push(tf("failed to encode content manifest: {}", &[error.as_str()]));
+                    .push(tf("error.manifest_encode", &[("error", error.as_str())]));
             }
         }
     }
@@ -605,13 +604,13 @@ impl App {
         }
         let path = PathBuf::from(self.modpack_file.trim());
         if !path.is_file() {
-            self.modpack_error = Some(t("modpack file not found").to_owned());
+            self.modpack_error = Some(t("modpack.error.file_not_found").to_owned());
             return;
         }
         self.modpack_installing = true;
         self.modpack_notice = None;
         self.modpack_error = None;
-        self.modpack_progress = Some(t("installing modpack...").to_owned());
+        self.modpack_progress = Some(t("modpack.installing").to_owned());
         let dir = PathBuf::from(if self.minecraft_dir.trim().is_empty() {
             DEFAULT_MINECRAFT_DIR
         } else {
@@ -707,15 +706,15 @@ impl App {
         ctx: &egui::Context,
     ) {
         if game_version.trim().is_empty() {
-            self.mod_error = Some(t("enter a Minecraft version first").to_owned());
+            self.mod_error = Some(t("content.need_minecraft_version").to_owned());
             return;
         }
         if kind == ProjectType::Mod && loader.as_deref().unwrap_or("").trim().is_empty() {
-            self.mod_error = Some(t("pick a loader before installing mods").to_owned());
+            self.mod_error = Some(t("content.need_loader").to_owned());
             return;
         }
         if kind == ProjectType::DataPack && self.mod_datapack_world.trim().is_empty() {
-            self.mod_error = Some(t("pick a world before installing data packs").to_owned());
+            self.mod_error = Some(t("content.need_world").to_owned());
             return;
         }
         if kind != ProjectType::Modpack
@@ -723,7 +722,7 @@ impl App {
             && self.mods_target_instance().is_none()
         {
             self.mod_error =
-                Some(t("version isolation is on, pick an instance to install into").to_owned());
+                Some(t("content.need_instance").to_owned());
             return;
         }
         self.mod_installing = Some(project.clone());
@@ -732,7 +731,7 @@ impl App {
         if kind == ProjectType::Modpack {
             // 与本地安装共用同一套进度展示
             self.modpack_installing = true;
-            self.modpack_progress = Some(t("installing modpack...").to_owned());
+            self.modpack_progress = Some(t("modpack.installing").to_owned());
             self.modpack_notice = None;
             self.modpack_error = None;
             let minecraft_dir = PathBuf::from(if self.minecraft_dir.trim().is_empty() {
@@ -844,11 +843,11 @@ fn safe_file_name(name: &str) -> String {
 
 fn content_label(kind: ProjectType) -> &'static str {
     match kind {
-        ProjectType::Mod => t("Mods"),
-        ProjectType::ResourcePack => t("Resource packs"),
-        ProjectType::ShaderPack => t("Shader packs"),
-        ProjectType::DataPack => t("Data packs"),
-        ProjectType::Modpack => t("Modpacks"),
+        ProjectType::Mod => t("content.type.mods"),
+        ProjectType::ResourcePack => t("content.type.resourcepacks"),
+        ProjectType::ShaderPack => t("content.type.shaders"),
+        ProjectType::DataPack => t("content.type.datapacks"),
+        ProjectType::Modpack => t("content.type.modpacks"),
     }
 }
 

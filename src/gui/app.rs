@@ -257,7 +257,7 @@ impl App {
         i18n::set_language(language);
         let config_status = load_error.map(|error| {
             let error = error.to_string();
-            tf("failed to load configuration: {}", &[error.as_str()])
+            tf("error.config_load", &[("error", error.as_str())])
         });
         let minecraft_dir = if config.minecraft_dir.trim().is_empty() {
             DEFAULT_MINECRAFT_DIR.to_owned()
@@ -351,7 +351,7 @@ impl App {
             (Err(error), _) | (_, Err(error)) => {
                 let error = error.to_string();
                 self.log
-                    .push(tf("failed to read accounts: {}", &[error.as_str()]));
+                    .push(tf("error.accounts_read", &[("error", error.as_str())]));
             }
         }
     }
@@ -472,12 +472,12 @@ impl App {
         match self.config.save() {
             Ok(path) => {
                 let path = path.display().to_string();
-                self.config_status = Some(tf("saved to {}", &[path.as_str()]));
+                self.config_status = Some(tf("common.saved_to", &[("path", path.as_str())]));
                 self.scan_installed();
             }
             Err(error) => {
                 let error = error.to_string();
-                self.config_status = Some(tf("save failed: {}", &[error.as_str()]));
+                self.config_status = Some(tf("error.save_failed", &[("error", error.as_str())]));
             }
         }
     }
@@ -490,11 +490,11 @@ impl App {
         match self.config.save() {
             Ok(path) => {
                 let path = path.display().to_string();
-                self.config_status = Some(tf("saved to {}", &[path.as_str()]));
+                self.config_status = Some(tf("common.saved_to", &[("path", path.as_str())]));
             }
             Err(error) => {
                 let error = error.to_string();
-                self.config_status = Some(tf("save failed: {}", &[error.as_str()]));
+                self.config_status = Some(tf("error.save_failed", &[("error", error.as_str())]));
             }
         }
     }
@@ -509,16 +509,22 @@ impl App {
             let result = auth
                 .login(move |prompt| {
                     let _ = prompt_tx.send(Message::Log(tf(
-                        "open {} and enter code {}",
-                        &[prompt.verification_uri.as_str(), prompt.user_code.as_str()],
+                        "gui.login.open",
+                        &[
+                            ("url", prompt.verification_uri.as_str()),
+                            ("code", prompt.user_code.as_str()),
+                        ],
                     )));
                 })
                 .await;
             let line = match result {
-                Ok(session) => tf("logged in: {}", &[session.profile.name.as_str()]),
+                Ok(session) => tf(
+                    "gui.login.logged_in",
+                    &[("name", session.profile.name.as_str())],
+                ),
                 Err(error) => {
                     let error = error.to_string();
-                    tf("login failed: {}", &[error.as_str()])
+                    tf("error.login_failed", &[("error", error.as_str())])
                 }
             };
             let _ = tx.send(Message::Log(line));
@@ -602,15 +608,16 @@ impl eframe::App for App {
                         Ok(report) => {
                             let version = report.version_id.clone();
                             self.modpack_notice =
-                                Some(tf("modpack installed: {}", &[version.as_str()]));
-                            self.log.push(tf("modpack installed: {}", &[version.as_str()]));
+                                Some(tf("modpack.installed", &[("version", version.as_str())]));
+                            self.log
+                                .push(tf("modpack.installed", &[("version", version.as_str())]));
                             self.log.push(report.timings.summary());
                             self.launch_version = version;
                             self.scan_installed();
                         }
                         Err(error) => {
                             let line =
-                                tf("modpack install failed: {}", &[error.as_str()]);
+                                tf("error.modpack_failed", &[("error", error.as_str())]);
                             self.modpack_error = Some(line.clone());
                             self.log.push(line);
                         }
@@ -724,23 +731,25 @@ impl eframe::App for App {
                             let root_name = outcome
                                 .root()
                                 .map(|installed| installed.filename.as_str())
-                                .unwrap_or_else(|| t("content"));
+                                .unwrap_or_else(|| t("content.generic"));
                             let dependencies = outcome.installed.len().saturating_sub(1);
                             let directory = dir.display().to_string();
-                            let mut notice =
-                                tf("installed {} into {}", &[root_name, directory.as_str()]);
+                            let mut notice = tf(
+                                "install.installed_into",
+                                &[("name", root_name), ("dir", directory.as_str())],
+                            );
                             if dependencies > 0 {
                                 let dependencies = dependencies.to_string();
                                 notice.push_str(&tf(
-                                    " (+{} dependencies)",
-                                    &[dependencies.as_str()],
+                                    "content.dependencies_suffix",
+                                    &[("count", dependencies.as_str())],
                                 ));
                             }
                             if !outcome.skipped.is_empty() {
                                 let skipped = outcome.skipped.join(", ");
                                 notice.push_str(&tf(
-                                    "; missing dependencies: {}",
-                                    &[skipped.as_str()],
+                                    "content.missing_dependencies_suffix",
+                                    &[("list", skipped.as_str())],
                                 ));
                             }
                             self.mod_notice = Some(notice);

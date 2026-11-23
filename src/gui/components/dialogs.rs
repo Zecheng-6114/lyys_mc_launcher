@@ -7,14 +7,12 @@ impl App {
     pub(crate) fn modpack_form(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.label(
-            egui::RichText::new(t(
-                "path to a .mrpack, CurseForge or server pack archive",
-            ))
-            .weak()
-            .small(),
+            egui::RichText::new(t("modpack.file.hint"))
+                .weak()
+                .small(),
         );
         ui.horizontal(|ui| {
-            ui.label(t("Modpack file:"));
+            ui.label(t("modpack.file.label"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.modpack_file)
                     .id_salt("modpack_file")
@@ -23,13 +21,13 @@ impl App {
         });
         ui.checkbox(
             &mut self.modpack_with_optional,
-            t("Include optional files"),
+            t("modpack.file.optional"),
         );
         ui.add_space(8.0);
         if ui
             .add_enabled(
                 !self.modpack_installing,
-                egui::Button::new(t("Install modpack")),
+                egui::Button::new(t("modpack.install")),
             )
             .clicked()
         {

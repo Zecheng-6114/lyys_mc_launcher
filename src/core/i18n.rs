@@ -1,7 +1,8 @@
 //! Lightweight gettext-style translations embedded at compile time.
 //!
-//! Keys are the English source strings themselves, so code reads as
-//! `t("Install instance")`. The locale files live in `locales/` and are
+//! Keys are semantic identifiers such as `nav.install` or `error.save_failed`.
+//! Placeholders in the values are named, e.g. `"downloaded {downloaded} files"`,
+//! and are substituted by [`tf`]. The locale files live in `locales/` and are
 //! included into the binary, which keeps the launcher self-contained.
 
 use std::collections::HashMap;
@@ -40,14 +41,23 @@ impl Language {
         }
     }
 
+    /// Parse a configuration code or a locale tag such as `zh-CN` / `ja_JP`.
     pub fn from_code(code: &str) -> Option<Self> {
-        match code.trim().to_ascii_lowercase().as_str() {
-            "en_us" => Some(Self::EnUs),
-            "zh_cn" => Some(Self::ZhCn),
-            "zh_tw" => Some(Self::ZhTw),
-            "ja_jp" => Some(Self::JaJp),
-            _ => None,
+        let tag = code.trim().to_ascii_lowercase().replace('-', "_");
+        let primary = tag.split('.').next().unwrap_or("");
+        if primary.starts_with("zh") {
+            let traditional = ["tw", "hk", "mo", "hant"]
+                .iter()
+                .any(|part| primary.contains(part));
+            return Some(if traditional { Self::ZhTw } else { Self::ZhCn });
         }
+        if primary.starts_with("ja") {
+            return Some(Self::JaJp);
+        }
+        if primary.starts_with("en") {
+            return Some(Self::EnUs);
+        }
+        None
     }
 
     /// Best effort guess from the environment; defaults to English.
@@ -56,24 +66,24 @@ impl Language {
             let Ok(value) = std::env::var(key) else {
                 continue;
             };
-            let value = value.to_ascii_lowercase();
-            if value.starts_with("zh_cn") || value.starts_with("zh-hans") {
-                return Self::ZhCn;
+            let value = value.trim().to_ascii_lowercase();
+            if value.is_empty() || value == "c" || value == "posix" {
+                continue;
             }
-            if value.starts_with("zh_tw")
-                || value.starts_with("zh-hk")
-                || value.starts_with("zh-hant")
-            {
-                return Self::ZhTw;
-            }
-            if value.starts_with("ja") {
-                return Self::JaJp;
-            }
-            if value.starts_with("en") {
-                return Self::EnUs;
+            if let Some(language) = Self::from_code(&value) {
+                return language;
             }
         }
         Self::EnUs
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::EnUs => include_str!("../../locales/en_us.json"),
+            Self::ZhCn => include_str!("../../locales/zh_cn.json"),
+            Self::ZhTw => include_str!("../../locales/zh_tw.json"),
+            Self::JaJp => include_str!("../../locales/ja_jp.json"),
+        }
     }
 
     fn index(self) -> u8 {
@@ -101,78 +111,63 @@ pub fn current() -> Language {
     }
 }
 
-/// One parsed locale file.
-struct Catalog {
-    entries: HashMap<&'static str, &'static str>,
+fn parse(source: &str) -> HashMap<String, String> {
+    serde_json::from_str(source).unwrap_or_default()
 }
 
-impl Catalog {
-    fn parse(raw: &'static str) -> Self {
-        let parsed: HashMap<String, String> = serde_json::from_str(raw).unwrap_or_default();
-        let entries = parsed
-            .into_iter()
-            .map(|(key, value)| {
-                let key: &'static str = Box::leak(key.into_boxed_str());
-                let value: &'static str = Box::leak(value.into_boxed_str());
-                (key, value)
-            })
-            .collect();
-        Self { entries }
+/// Parsed locale file; initialized once and kept for the whole process.
+fn catalog(language: Language) -> &'static HashMap<String, String> {
+    static EN_US: OnceLock<HashMap<String, String>> = OnceLock::new();
+    static ZH_CN: OnceLock<HashMap<String, String>> = OnceLock::new();
+    static ZH_TW: OnceLock<HashMap<String, String>> = OnceLock::new();
+    static JA_JP: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+    match language {
+        Language::EnUs => EN_US.get_or_init(|| parse(Language::EnUs.source())),
+        Language::ZhCn => ZH_CN.get_or_init(|| parse(Language::ZhCn.source())),
+        Language::ZhTw => ZH_TW.get_or_init(|| parse(Language::ZhTw.source())),
+        Language::JaJp => JA_JP.get_or_init(|| parse(Language::JaJp.source())),
     }
-
-    fn get(&self, key: &str) -> Option<&'static str> {
-        self.entries.get(key).copied()
-    }
-}
-
-struct Catalogs {
-    en_us: Catalog,
-    zh_cn: Catalog,
-    zh_tw: Catalog,
-    ja_jp: Catalog,
-}
-
-fn catalogs() -> &'static Catalogs {
-    static CATALOGS: OnceLock<Catalogs> = OnceLock::new();
-    CATALOGS.get_or_init(|| Catalogs {
-        en_us: Catalog::parse(include_str!("../../locales/en_us.json")),
-        zh_cn: Catalog::parse(include_str!("../../locales/zh_cn.json")),
-        zh_tw: Catalog::parse(include_str!("../../locales/zh_tw.json")),
-        ja_jp: Catalog::parse(include_str!("../../locales/ja_jp.json")),
-    })
 }
 
 /// Translate a static key, falling back to English and then to the key itself.
 pub fn t(key: &'static str) -> &'static str {
-    let catalogs = catalogs();
-    let catalog = match current() {
-        Language::EnUs => &catalogs.en_us,
-        Language::ZhCn => &catalogs.zh_cn,
-        Language::ZhTw => &catalogs.zh_tw,
-        Language::JaJp => &catalogs.ja_jp,
-    };
-    catalog
+    if let Some(value) = catalog(current()).get(key) {
+        return value;
+    }
+    catalog(Language::EnUs)
         .get(key)
-        .or_else(|| catalogs.en_us.get(key))
+        .map(String::as_str)
         .unwrap_or(key)
 }
 
-/// Translate a key and replace its `{}` placeholders in order.
-pub fn tf(key: &'static str, args: &[&str]) -> String {
+/// Translate a key and substitute `{name}` placeholders from `args`.
+pub fn tf(key: &'static str, args: &[(&str, &str)]) -> String {
     let template = t(key);
-    if args.is_empty() {
+    if args.is_empty() || !template.contains('{') {
         return template.to_owned();
     }
-    let mut output =
-        String::with_capacity(template.len() + args.iter().map(|arg| arg.len()).sum::<usize>());
+    let mut output = String::with_capacity(
+        template.len() + args.iter().map(|(_, value)| value.len()).sum::<usize>(),
+    );
     let mut rest = template;
-    for arg in args {
-        let Some(position) = rest.find("{}") else {
-            break;
+    while let Some(start) = rest.find('{') {
+        output.push_str(&rest[..start]);
+        let tail = &rest[start + 1..];
+        let Some(end) = tail.find('}') else {
+            output.push_str(&rest[start..]);
+            return output;
         };
-        output.push_str(&rest[..position]);
-        output.push_str(arg);
-        rest = &rest[position + 2..];
+        let name = &tail[..end];
+        match args.iter().find(|(arg, _)| *arg == name) {
+            Some((_, value)) => output.push_str(value),
+            None => {
+                output.push('{');
+                output.push_str(name);
+                output.push('}');
+            }
+        }
+        rest = &tail[end + 1..];
     }
     output.push_str(rest);
     output

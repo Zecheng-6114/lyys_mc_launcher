@@ -267,22 +267,28 @@ async fn run_account(action: AccountAction) -> Result<(), CliError> {
                     println!(
                         "{}",
                         tf(
-                            "open {} in a browser and enter code {}",
-                            &[prompt.verification_uri.as_str(), prompt.user_code.as_str()],
+                            "cli.login.open",
+                            &[
+                                ("url", prompt.verification_uri.as_str()),
+                                ("code", prompt.user_code.as_str()),
+                            ],
                         )
                     );
                     let minutes = (prompt.expires_in / 60).to_string();
                     println!(
                         "{}",
-                        tf("the code is valid for {} minutes", &[minutes.as_str()])
+                        tf("cli.login.code_valid", &[("minutes", minutes.as_str())])
                     );
                 })
                 .await?;
             println!(
                 "{}",
                 tf(
-                    "logged in: {} ({})",
-                    &[session.profile.name.as_str(), session.profile.id.as_str()],
+                    "cli.login.logged_in",
+                    &[
+                        ("name", session.profile.name.as_str()),
+                        ("uuid", session.profile.id.as_str()),
+                    ],
                 )
             );
         }
@@ -292,18 +298,21 @@ async fn run_account(action: AccountAction) -> Result<(), CliError> {
             println!(
                 "{}",
                 tf(
-                    "offline account added: {} ({})",
-                    &[session.profile.name.as_str(), session.profile.id.as_str()],
+                    "cli.account.offline_added",
+                    &[
+                        ("name", session.profile.name.as_str()),
+                        ("uuid", session.profile.id.as_str()),
+                    ],
                 )
             );
         }
         AccountAction::Use { uuid } => {
             auth.set_active(&uuid)?;
-            println!("{}", tf("active account set to {}", &[uuid.as_str()]));
+            println!("{}", tf("cli.account.active_set", &[("account", uuid.as_str())]));
         }
         AccountAction::Remove { uuid } => {
             auth.remove(&uuid)?;
-            println!("{}", tf("account removed: {}", &[uuid.as_str()]));
+            println!("{}", tf("cli.account.removed", &[("account", uuid.as_str())]));
         }
         AccountAction::Current => {
             let session = auth.refresh_current().await?;
@@ -339,8 +348,8 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
                 print!(
                     "\r{}",
                     tf(
-                        "downloaded {} files, skipped {}",
-                        &[downloaded.as_str(), skipped.as_str()],
+                        "install.summary",
+                        &[("downloaded", downloaded.as_str()), ("skipped", skipped.as_str())],
                     )
                 );
                 let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -365,8 +374,8 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
     println!(
         "{}",
         tf(
-            "installed {} into {}",
-            &[version_id.as_str(), directory.as_str()],
+            "install.installed_into",
+            &[("name", version_id.as_str()), ("dir", directory.as_str())],
         )
     );
     Ok(())
@@ -421,7 +430,13 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
     })?;
     println!(
         "{}",
-        tf("launched {}, pid {}", &[args.version.as_str(), child.id().to_string().as_str()])
+        tf(
+            "cli.launch.launched",
+            &[
+                ("name", args.version.as_str()),
+                ("pid", child.id().to_string().as_str()),
+            ],
+        )
     );
     // 子进程继承终端输出，不等到它退出就交还 shell 会把游戏日志和提示符搅在一起
     let status = child.wait().map_err(AuthError::from)?;
@@ -437,15 +452,15 @@ fn run_java_list() -> Result<(), CliError> {
     let minecraft_dir = resolve_minecraft_dir(None, &config)?;
     let selected = config.java_path.trim();
     let runtimes = java::discover(&minecraft_dir, &config.java_versions);
-    println!("{}", t("Installed Java"));
+    println!("{}", t("settings.java.installed"));
     if runtimes.is_empty() {
-        println!("{}", t("no Java found"));
+        println!("{}", t("cli.java.none"));
         return Ok(());
     }
     for runtime in &runtimes {
         let path = runtime.executable.display().to_string();
         let marker = if path == selected {
-            format!(" {}", t("(selected)"))
+            format!(" {}", t("cli.java.selected"))
         } else {
             String::new()
         };
@@ -470,14 +485,17 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
     })
     .await?;
     if result.hits.is_empty() {
-        println!("{}", t("no content found"));
+        println!("{}", t("cli.search.none"));
         return Ok(());
     }
     for hit in &result.hits {
         let downloads = hit.downloads.to_string();
         println!(
             "{}",
-            tf("{}  ·  {} downloads", &[hit.title.as_str(), downloads.as_str()])
+            tf(
+                "cli.search.hit",
+                &[("title", hit.title.as_str()), ("downloads", downloads.as_str())],
+            )
         );
         println!(
             "  https://modrinth.com/{}/{}",
@@ -490,7 +508,7 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
     let shown = result.hits.len().to_string();
     println!(
         "{}",
-        tf("{} results, showing {}", &[total_hits.as_str(), shown.as_str()])
+        tf("cli.search.results", &[("total", total_hits.as_str()), ("shown", shown.as_str())])
     );
     Ok(())
 }
@@ -500,13 +518,13 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
     let game_version = args.minecraft.trim();
     if game_version.is_empty() {
         return Err(CliError::Usage(
-            t("--minecraft must not be empty").to_owned(),
+            t("cli.error.minecraft_empty").to_owned(),
         ));
     }
     let loader = args.loader.as_deref().map(str::trim).unwrap_or("");
     if kind == modrinth::ProjectType::Mod && loader.is_empty() {
         return Err(CliError::Usage(
-            t("mods need --loader fabric, quilt, forge or neoforge").to_owned(),
+            t("cli.error.mods_loader").to_owned(),
         ));
     }
 
@@ -531,14 +549,14 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
                     let world = args.world.as_deref().map(str::trim).unwrap_or("");
                     if world.is_empty() {
                         return Err(CliError::Usage(
-                            t("data packs need --world <save name>").to_owned(),
+                            t("cli.error.datapack_world").to_owned(),
                         ));
                     }
                     game_dir.join("saves").join(world).join("datapacks")
                 }
                 modrinth::ProjectType::Modpack => {
                     return Err(CliError::Usage(
-                        t("modpacks are installed with the modpack command").to_owned(),
+                        t("cli.error.modpack_command").to_owned(),
                     ));
                 }
             }
@@ -555,19 +573,19 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
         println!(
             "{}",
             tf(
-                "installed {} ({})",
+                "cli.install.installed_detail",
                 &[
-                    installed.filename.as_str(),
-                    installed.version_number.as_str()
+                    ("name", installed.filename.as_str()),
+                    ("version", installed.version_number.as_str()),
                 ],
             )
         );
     }
     let directory = target.display().to_string();
-    println!("{}", tf("saved to {}", &[directory.as_str()]));
+    println!("{}", tf("common.saved_to", &[("path", directory.as_str())]));
     if !outcome.skipped.is_empty() {
         let skipped = outcome.skipped.join(", ");
-        println!("{}", tf("missing dependencies: {}", &[skipped.as_str()]));
+        println!("{}", tf("content.missing_dependencies", &[("list", skipped.as_str())]));
     }
     Ok(())
 }
@@ -582,27 +600,36 @@ async fn run_modpack(args: ModpackArgs) -> Result<(), CliError> {
             println!(
                 "{}",
                 tf(
-                    "modpack {} ({})",
-                    &[pack.name.as_str(), pack.version.as_str()]
+                    "cli.modpack.title",
+                    &[("name", pack.name.as_str()), ("version", pack.version.as_str())]
                 )
             );
-            println!("{}", tf("provider: {}", &[pack.provider.name()]));
-            println!("{}", tf("Minecraft {}", &[pack.game_version.as_str()]));
+            println!("{}", tf("cli.modpack.provider", &[("provider", pack.provider.name())]));
+            println!("{}", tf("cli.modpack.minecraft", &[("version", pack.game_version.as_str())]));
             if let Some(loader) = &pack.loader {
                 println!(
                     "{}",
-                    tf("loader: {}", &[modpack::describe_loader(loader).as_str()])
+                    tf(
+                        "cli.modpack.loader",
+                        &[("loader", modpack::describe_loader(loader).as_str())],
+                    )
                 );
             }
             if !pack.author.trim().is_empty() {
-                println!("{}", tf("author: {}", &[pack.author.as_str()]));
+                println!("{}", tf("cli.modpack.author", &[("author", pack.author.as_str())]));
             }
             if !pack.description.trim().is_empty() {
                 println!("{}", pack.description);
             }
             let files = pack.installable_files(true).to_string();
             let size = human_size(pack.installable_bytes(true));
-            println!("{}", tf("files: {}, size: {}", &[files.as_str(), size.as_str()]));
+            println!(
+                "{}",
+                tf(
+                    "cli.modpack.files",
+                    &[("files", files.as_str()), ("size", size.as_str())],
+                )
+            );
             Ok(())
         }
     }
@@ -621,7 +648,7 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
         java: &java,
         with_optional: args.with_optional,
     };
-    println!("{}", t("installing modpack..."));
+    println!("{}", t("modpack.installing"));
     let reporter = Arc::new(|progress: PackProgress| {
         let line = progress.describe();
         if line.is_empty() {
@@ -637,7 +664,7 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
     let report = report?;
     println!(
         "{}",
-        tf("modpack installed: {}", &[report.version_id.as_str()])
+        tf("modpack.installed", &[("version", report.version_id.as_str())])
     );
     println!("{}", report.timings.summary());
     let files = report.files.to_string();
@@ -645,19 +672,19 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
     println!(
         "{}",
         tf(
-            "installed {} files and {} overrides",
-            &[files.as_str(), overrides.as_str()]
+            "modpack.installed_detail",
+            &[("files", files.as_str()), ("overrides", overrides.as_str())]
         )
     );
     if !report.excluded.is_empty() {
         let skipped = report.excluded.join(", ");
         println!(
             "{}",
-            tf("skipped optional files: {}", &[skipped.as_str()])
+            tf("modpack.skipped_optional", &[("files", skipped.as_str())])
         );
     }
     let game_dir = report.game_dir.display().to_string();
-    println!("{}", tf("saved to {}", &[game_dir.as_str()]));
+    println!("{}", tf("common.saved_to", &[("path", game_dir.as_str())]));
     Ok(())
 }
 
@@ -682,44 +709,51 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
         ConfigAction::Show => {
             let path = config::path()?;
             let path = path.display().to_string();
-            println!("{}", tf("config file: {}", &[path.as_str()]));
+            println!("{}", tf("cli.config.file", &[("path", path.as_str())]));
             let dir = if config.minecraft_dir.trim().is_empty() {
-                t("(default .minecraft)")
+                t("cli.config.default_dir")
             } else {
                 config.minecraft_dir.trim()
             };
             let java = if config.java_path.trim().is_empty() {
-                t("auto (match the game version)")
+                t("settings.java.auto")
             } else {
                 config.java_path.trim()
             };
-            println!("{}", tf("minecraft dir: {}", &[dir]));
-            println!("{}", tf("java path: {}", &[java]));
+            println!("{}", tf("cli.config.minecraft_dir", &[("path", dir)]));
+            println!("{}", tf("cli.config.java_path", &[("path", java)]));
             if !config.java_versions.is_empty() {
-                println!("{}", t("known Java:"));
+                println!("{}", t("cli.java.known"));
                 for path in &config.java_versions {
                     println!("  {path}");
                 }
             }
-            println!("{}", tf("version isolation: {}", &[yes_no(config.isolate)]));
+            println!("{}", tf("common.version_isolation", &[("value", yes_no(config.isolate))]));
             if config.instances.is_empty() {
-                println!("{}", t("instance overrides: none"));
+                println!("{}", t("cli.config.overrides_none"));
             } else {
-                println!("{}", t("instance overrides:"));
+                println!("{}", t("cli.config.overrides"));
                 for (id, entry) in &config.instances {
                     if entry.use_global {
-                        println!("{}", tf("  {}: uses global configuration", &[id.as_str()]));
+                        println!(
+                            "{}",
+                            tf("cli.config.instance_global", &[("instance", id.as_str())])
+                        );
                     } else {
                         let java = if entry.java_path.trim().is_empty() {
-                            t("(global)").to_owned()
+                            t("common.global_paren").to_owned()
                         } else {
                             entry.java_path.trim().to_owned()
                         };
                         println!(
                             "{}",
                             tf(
-                                "  {}: isolate={}, java={}",
-                                &[id.as_str(), yes_no(entry.isolate), java.as_str()],
+                                "cli.config.instance_detail",
+                                &[
+                                    ("instance", id.as_str()),
+                                    ("isolate", yes_no(entry.isolate)),
+                                    ("java", java.as_str()),
+                                ],
                             )
                         );
                     }
@@ -745,7 +779,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             }
             let path = config.save()?;
             let path = path.display().to_string();
-            println!("{}", tf("configuration saved to {}", &[path.as_str()]));
+            println!("{}", tf("common.config_saved", &[("path", path.as_str())]));
         }
         ConfigAction::Instance {
             version,
@@ -765,7 +799,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             } else {
                 if !isolate && !no_isolate && java.is_none() {
                     return Err(CliError::Usage(
-                        t("pass --global, --isolate, --no-isolate or --java to configure an instance")
+                        t("cli.error.instance_flags")
                             .to_owned(),
                     ));
                 }
@@ -785,8 +819,8 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             println!(
                 "{}",
                 tf(
-                    "instance {} saved to {}",
-                    &[version.as_str(), path.as_str()],
+                    "cli.config.instance_saved",
+                    &[("instance", version.as_str()), ("path", path.as_str())],
                 )
             );
         }
@@ -800,7 +834,7 @@ fn configured_java(value: &str) -> Option<PathBuf> {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { t("on") } else { t("off") }
+    if value { t("common.on") } else { t("common.off") }
 }
 
 fn resolve_minecraft_dir(
@@ -820,7 +854,7 @@ fn resolve_minecraft_dir(
 fn print_accounts(auth: &Auth) -> Result<(), AuthError> {
     let accounts = auth.list()?;
     if accounts.is_empty() {
-        println!("{}", t("no accounts yet, run account login to add one"));
+        println!("{}", t("cli.account.none"));
         return Ok(());
     }
     let active = auth.active_uuid()?;
@@ -837,9 +871,9 @@ fn print_accounts(auth: &Auth) -> Result<(), AuthError> {
 
 fn account_line(marker: &str, account: &AccountSession) -> String {
     let state = match account.state {
-        SessionState::Valid => t("valid"),
-        SessionState::NeedsRelogin => t("needs relogin"),
-        SessionState::Offline => t("offline"),
+        SessionState::Valid => t("account.state.valid"),
+        SessionState::NeedsRelogin => t("account.state.relogin"),
+        SessionState::Offline => t("account.state.offline"),
     };
     format!(
         "{marker} {}  {}  {state}",

@@ -8,7 +8,7 @@ use crate::gui::app::{App, LoaderChoice, Message, Task};
 
 impl App {
     pub(crate) fn install_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t("Install instance"));
+        ui.heading(t("nav.install"));
         let loader_key = (self.install_loader, self.install_version.trim().to_owned());
         if self.install_loader != LoaderChoice::Vanilla
             && self.loader_versions_key.as_ref() != Some(&loader_key)
@@ -18,12 +18,12 @@ impl App {
             self.load_loader_versions(ui.ctx());
         }
         ui.horizontal(|ui| {
-            ui.label(t("Version:"));
+            ui.label(t("install.version"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.install_version).id_salt("install_version"),
             );
             if ui
-                .add_enabled(!self.versions_loading, egui::Button::new(t("Refresh list")))
+                .add_enabled(!self.versions_loading, egui::Button::new(t("common.refresh_list")))
                 .clicked()
             {
                 self.reload_versions(ui.ctx());
@@ -32,13 +32,13 @@ impl App {
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut self.show_all_versions,
-                t("Show snapshots and old versions"),
+                t("install.show_all"),
             );
             if self.versions_loading {
                 ui.add(egui::widgets::Spinner::new().size(14.0));
-                ui.label(t("loading versions..."));
+                ui.label(t("install.versions_loading"));
             } else if let Some(error) = &self.versions_error {
-                ui.label(tf("version list failed: {}", &[error.as_str()]));
+                ui.label(tf("error.versions_load", &[("error", error.as_str())]));
             }
         });
         if !self.versions.is_empty() {
@@ -64,7 +64,7 @@ impl App {
                 });
         }
         ui.horizontal(|ui| {
-            ui.label(t("Loader:"));
+            ui.label(t("install.loader"));
             egui::ComboBox::from_id_salt("install_loader")
                 .selected_text(self.install_loader.label())
                 .show_ui(ui, |ui| {
@@ -73,14 +73,17 @@ impl App {
                     }
                 });
             if self.install_loader != LoaderChoice::Vanilla {
-                ui.label(t("Loader version:"));
+                ui.label(t("install.loader_version"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.install_loader_version)
                         .id_salt("install_loader_version")
-                        .hint_text(t("latest")),
+                        .hint_text(t("common.latest")),
                 );
                 if ui
-                    .add_enabled(!self.loader_versions_loading, egui::Button::new(t("Refresh")))
+                    .add_enabled(
+                        !self.loader_versions_loading,
+                        egui::Button::new(t("common.refresh")),
+                    )
                     .clicked()
                 {
                     self.loader_versions_key = Some((
@@ -96,11 +99,11 @@ impl App {
         });
         if self.install_loader != LoaderChoice::Vanilla {
             if let Some(error) = &self.loader_versions_error {
-                ui.label(tf("loader list failed: {}", &[error.as_str()]));
+                ui.label(tf("error.loaders_load", &[("error", error.as_str())]));
             }
             if self.loader_versions.is_empty() {
                 if !self.loader_versions_loading && self.loader_versions_error.is_none() {
-                    ui.label(t("no compatible loader version found"));
+                    ui.label(t("install.loader_none"));
                 }
             } else {
                 egui::ScrollArea::vertical()
@@ -122,13 +125,13 @@ impl App {
             }
         }
         ui.horizontal(|ui| {
-            ui.label(t("Minecraft dir:"));
+            ui.label(t("settings.minecraft_dir"));
             ui.add(egui::TextEdit::singleline(&mut self.minecraft_dir).id_salt("install_dir"));
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!self.installing, egui::Button::new(t("Install")))
+                .add_enabled(!self.installing, egui::Button::new(t("common.install")))
                 .clicked()
             {
                 self.start_install(ui.ctx());
@@ -142,11 +145,11 @@ impl App {
             let downloaded = progress.downloaded.to_string();
             let skipped = progress.skipped.to_string();
             ui.monospace(tf(
-                "files downloaded: {} · skipped: {}",
-                &[downloaded.as_str(), skipped.as_str()],
+                "install.files_summary",
+                &[("downloaded", downloaded.as_str()), ("skipped", skipped.as_str())],
             ));
             if let Some(current) = &progress.current {
-                ui.monospace(tf("current: {}", &[current.as_str()]));
+                ui.monospace(tf("install.current", &[("name", current.as_str())]));
             }
         }
     }
@@ -203,7 +206,7 @@ impl App {
     pub(crate) fn start_install(&mut self, ctx: &egui::Context) {
         let version = self.install_version.trim().to_owned();
         if version.is_empty() {
-            self.log.push(t("enter a version first").to_owned());
+            self.log.push(t("install.need_version").to_owned());
             return;
         }
         self.installing = true;
@@ -238,19 +241,25 @@ impl App {
                         &mut reporter,
                     ) {
                         Ok(result) => {
-                            tf("installed {} {}", &[loader_name, result.version_id.as_str()])
+                            tf(
+                                "install.installed",
+                                &[
+                                    ("version", loader_name),
+                                    ("loader", result.version_id.as_str()),
+                                ],
+                            )
                         }
                         Err(error) => {
                             let error = error.to_string();
-                            tf("install failed: {}", &[error.as_str()])
+                            tf("error.install_failed", &[("error", error.as_str())])
                         }
                     }
                 }
                 None => match install::install_with_reporter(&dir, &version, &mut reporter) {
-                    Ok(_) => tf("installed {}", &[version.as_str()]),
+                    Ok(_) => tf("install.installed_only", &[("version", version.as_str())]),
                     Err(error) => {
                         let error = error.to_string();
-                        tf("install failed: {}", &[error.as_str()])
+                        tf("error.install_failed", &[("error", error.as_str())])
                     }
                 },
             };

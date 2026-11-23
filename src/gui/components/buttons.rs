@@ -29,7 +29,11 @@ pub(crate) fn mod_result(
                     ui.label(egui::RichText::new(&hit.title).strong());
                     let downloads = hit.downloads.to_string();
                     ui.label(
-                        egui::RichText::new(tf("{} downloads", &[downloads.as_str()])).weak(),
+                        egui::RichText::new(tf(
+                            "search.downloads",
+                            &[("count", downloads.as_str())],
+                        ))
+                        .weak(),
                     );
                 });
                 if !hit.description.is_empty() {
@@ -54,9 +58,9 @@ pub(crate) fn mod_result(
                 }
                 if let Some(version) = installed_version {
                     let label = if version.is_empty() {
-                        t("installed").to_owned()
+                        t("content.state.installed").to_owned()
                     } else {
-                        tf("installed v{}", &[version])
+                        tf("content.state.installed_version", &[("version", version)])
                     };
                     ui.label(egui::RichText::new(label).weak().small());
                 }
@@ -66,7 +70,10 @@ pub(crate) fn mod_result(
                     }
                     if installed {
                         if ui
-                            .add_enabled(actions_enabled && target_ready, egui::Button::new(t("Uninstall")))
+                            .add_enabled(
+                                actions_enabled && target_ready,
+                                egui::Button::new(t("common.uninstall")),
+                            )
                             .clicked()
                         {
                             action = Some(ModAction::Uninstall);
@@ -74,7 +81,7 @@ pub(crate) fn mod_result(
                         if ui
                             .add_enabled(
                                 actions_enabled && target_ready,
-                                egui::Button::new(t("Reinstall")),
+                                egui::Button::new(t("common.reinstall")),
                             )
                             .clicked()
                         {
@@ -84,7 +91,10 @@ pub(crate) fn mod_result(
                             if ui
                                 .add_enabled(
                                     actions_enabled && target_ready,
-                                    egui::Button::new(tf("Update to {}", &[number])),
+                                    egui::Button::new(tf(
+                                        "content.update_to",
+                                        &[("version", number)],
+                                    )),
                                 )
                                 .clicked()
                             {
@@ -94,14 +104,14 @@ pub(crate) fn mod_result(
                     } else if ui
                         .add_enabled(
                             actions_enabled && target_ready && filters_ready,
-                            egui::Button::new(t("Install")),
+                            egui::Button::new(t("common.install")),
                         )
                         .clicked()
                     {
                         action = Some(ModAction::Install);
                     }
                     ui.hyperlink_to(
-                        t("Open on Modrinth"),
+                        t("content.open_modrinth"),
                         format!(
                             "https://modrinth.com/{}/{}",
                             kind.url_segment(),

@@ -6,12 +6,12 @@ use crate::gui::app::App;
 
 impl App {
     pub(crate) fn settings_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t("Settings"));
+        ui.heading(t("nav.settings"));
         let path = config::path()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| t("unavailable").to_owned());
+            .unwrap_or_else(|_| t("common.unavailable").to_owned());
         ui.label(
-            egui::RichText::new(tf("stored in {}", &[path.as_str()]))
+            egui::RichText::new(tf("settings.stored_in", &[("path", path.as_str())]))
                 .weak()
                 .small(),
         );
@@ -20,7 +20,7 @@ impl App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(t("Language:"));
+                    ui.label(t("settings.language"));
                     let mut language = i18n::current();
                     egui::ComboBox::from_id_salt("settings_language")
                         .selected_text(language.label())
@@ -36,18 +36,18 @@ impl App {
                 });
                 ui.add_space(10.0);
                 ui.group(|ui| {
-                    ui.label(egui::RichText::new(t("Global configuration")).strong());
+                    ui.label(egui::RichText::new(t("settings.global")).strong());
                     ui.horizontal(|ui| {
-                        ui.label(t("Minecraft dir:"));
+                        ui.label(t("settings.minecraft_dir"));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.minecraft_dir)
                                 .id_salt("settings_minecraft_dir"),
                         );
                     });
                     ui.horizontal(|ui| {
-                        ui.label(t("Installed Java"));
+                        ui.label(t("settings.java.installed"));
                         if ui
-                            .add_enabled(!self.java_scanning, egui::Button::new(t("Scan")))
+                            .add_enabled(!self.java_scanning, egui::Button::new(t("common.scan")))
                             .clicked()
                         {
                             self.scan_java(ui.ctx().clone());
@@ -59,7 +59,7 @@ impl App {
                     let selected = self.java_path.trim().to_owned();
                     let mut chosen: Option<String> = None;
                     if ui
-                        .radio(selected.is_empty(), t("auto (match the game version)"))
+                        .radio(selected.is_empty(), t("settings.java.auto"))
                         .clicked()
                     {
                         chosen = Some(String::new());
@@ -75,16 +75,14 @@ impl App {
                         self.java_path = path;
                         self.persist_java();
                     }
-                    ui.checkbox(&mut self.isolate, t("Version isolation"));
+                    ui.checkbox(&mut self.isolate, t("settings.isolate"));
                 });
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new(t("Instances")).strong());
+                ui.label(egui::RichText::new(t("settings.instances")).strong());
                 ui.label(
-                    egui::RichText::new(t(
-                        "Each instance uses the global configuration unless overridden below",
-                    ))
-                    .weak()
-                    .small(),
+                    egui::RichText::new(t("settings.instances_hint"))
+                        .weak()
+                        .small(),
                 );
                 let ids: Vec<String> = self
                     .installed
@@ -93,7 +91,7 @@ impl App {
                     .collect();
                 if ids.is_empty() {
                     ui.label(
-                        egui::RichText::new(t("no installed instance found"))
+                        egui::RichText::new(t("settings.instances_none"))
                             .weak()
                             .small(),
                     );
@@ -106,7 +104,7 @@ impl App {
                         if ui
                             .checkbox(
                                 &mut use_global,
-                                tf("{}: use global configuration", &[id.as_str()]),
+                                tf("settings.instance_use_global", &[("instance", id.as_str())]),
                             )
                             .changed()
                         {
@@ -123,13 +121,13 @@ impl App {
                                 java_path: String::new(),
                             }
                         });
-                        ui.checkbox(&mut entry.isolate, t("Version isolation"));
+                        ui.checkbox(&mut entry.isolate, t("settings.isolate"));
                         ui.horizontal(|ui| {
-                            ui.label(t("Java path:"));
+                            ui.label(t("settings.java_path"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut entry.java_path)
                                     .id_salt(("instance_java", id.as_str()))
-                                    .hint_text(t("inherit global")),
+                                    .hint_text(t("settings.inherit_global")),
                             );
                         });
                     });
@@ -150,7 +148,7 @@ impl App {
                     }
                 }
                 ui.add_space(10.0);
-                if ui.button(t("Save configuration")).clicked() {
+                if ui.button(t("settings.save")).clicked() {
                     self.save_config();
                 }
                 if let Some(status) = &self.config_status {

@@ -179,8 +179,8 @@ pub fn install(
         print!(
             "\r{}",
             tf(
-                "downloaded {} files, skipped {}",
-                &[downloaded.as_str(), skipped.as_str()],
+                "install.summary",
+                &[("downloaded", downloaded.as_str()), ("skipped", skipped.as_str())],
             )
         );
         let _ = std::io::stdout().flush();

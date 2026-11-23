@@ -9,7 +9,7 @@ impl App {
         let ctx = ui.ctx().clone();
         egui::Panel::top("accounts").show(ui, |ui| {
             ui.add_space(6.0);
-            ui.heading(t("Accounts"));
+            ui.heading(t("accounts.title"));
             for index in 0..self.accounts.len() {
                 let uuid = self.accounts[index].profile.id.clone();
                 let name = self.accounts[index].profile.name.clone();
@@ -22,25 +22,25 @@ impl App {
                             Err(error) => {
                                 let error = error.to_string();
                                 self.log.push(tf(
-                                    "failed to set active account: {}",
-                                    &[error.as_str()],
+                                    "error.account_active",
+                                    &[("error", error.as_str())],
                                 ));
                             }
                         }
                     }
                     let state = match state {
-                        SessionState::Valid => t("valid"),
-                        SessionState::NeedsRelogin => t("needs relogin"),
-                        SessionState::Offline => t("offline"),
+                        SessionState::Valid => t("account.state.valid"),
+                        SessionState::NeedsRelogin => t("account.state.relogin"),
+                        SessionState::Offline => t("account.state.offline"),
                     };
                     ui.label(state);
-                    if ui.small_button(t("Remove")).clicked() {
+                    if ui.small_button(t("common.remove")).clicked() {
                         match self.auth.remove(&uuid) {
                             Ok(()) => self.reload_accounts(),
                             Err(error) => {
                                 let error = error.to_string();
                                 self.log
-                                    .push(tf("failed to remove account: {}", &[error.as_str()]))
+                                    .push(tf("error.account_remove", &[("error", error.as_str())]))
                             }
                         }
                     }
@@ -48,10 +48,10 @@ impl App {
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label(t("Offline name:"));
+                ui.label(t("accounts.offline_name"));
                 ui.text_edit_singleline(&mut self.offline_name);
                 if ui
-                    .add_enabled(!self.logging_in, egui::Button::new(t("Add offline")))
+                    .add_enabled(!self.logging_in, egui::Button::new(t("accounts.add_offline")))
                     .clicked()
                 {
                     let name = self.offline_name.trim().to_owned();
@@ -63,14 +63,14 @@ impl App {
                         Err(error) => {
                             let error = error.to_string();
                             self.log
-                                .push(tf("failed to add account: {}", &[error.as_str()]));
+                                .push(tf("error.account_add", &[("error", error.as_str())]));
                         }
                     }
                 }
                 if ui
                     .add_enabled(
                         !self.logging_in,
-                        egui::Button::new(t("Login with Microsoft")),
+                        egui::Button::new(t("accounts.login_microsoft")),
                     )
                     .clicked()
                 {
@@ -83,10 +83,10 @@ impl App {
 
     pub(crate) fn page_tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.page, Page::Install, t("Install instance"));
-            ui.selectable_value(&mut self.page, Page::Launch, t("Launch instance"));
-            ui.selectable_value(&mut self.page, Page::Mods, t("Content"));
-            ui.selectable_value(&mut self.page, Page::Settings, t("Settings"));
+            ui.selectable_value(&mut self.page, Page::Install, t("nav.install"));
+            ui.selectable_value(&mut self.page, Page::Launch, t("nav.launch"));
+            ui.selectable_value(&mut self.page, Page::Mods, t("nav.content"));
+            ui.selectable_value(&mut self.page, Page::Settings, t("nav.settings"));
         });
     }
 }

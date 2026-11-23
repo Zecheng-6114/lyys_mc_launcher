@@ -12,7 +12,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let message = error.to_string();
-            eprintln!("{}", tf("error: {}", &[message.as_str()]));
+            eprintln!("{}", tf("error.prefix", &[("message", message.as_str())]));
             ExitCode::FAILURE
         }
     }
