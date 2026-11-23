@@ -234,7 +234,8 @@ fn archive_installer_log(installer_path: &Path) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let _ = std::fs::rename(source, dir.join(log_name));
+    let destination = dir.join(&log_name);
+    let _ = std::fs::rename(source, destination);
 }
 
 /// Forge / NeoForge 官方安装器要求目标目录里已有启动器档案文件，缺失时补一个空的。
