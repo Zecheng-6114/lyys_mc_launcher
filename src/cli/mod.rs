@@ -51,6 +51,7 @@ enum Command {
     Install(InstallArgs),
     Launch(LaunchArgs),
     Search(SearchArgs),
+    Download(DownloadArgs),
     Config(ConfigArgs),
     Gui,
 }
@@ -158,6 +159,32 @@ struct SearchArgs {
     loader: Option<String>,
 }
 
+#[derive(Args)]
+struct DownloadArgs {
+    /// Modrinth project slug or id.
+    project: String,
+    /// Project type: mod, resourcepack, shader or datapack.
+    #[arg(long = "type", value_enum, default_value = "mod")]
+    kind: ContentType,
+    /// Minecraft version used to pick a compatible file.
+    #[arg(long)]
+    minecraft: String,
+    /// Mod loader; required when installing mods.
+    #[arg(long)]
+    loader: Option<String>,
+    #[arg(long)]
+    minecraft_dir: Option<PathBuf>,
+    /// Instance whose isolation setting decides the game directory.
+    #[arg(long)]
+    instance: Option<String>,
+    /// Write the file into this directory instead of the default location.
+    #[arg(long)]
+    target: Option<PathBuf>,
+    /// Save name used for data packs.
+    #[arg(long)]
+    world: Option<String>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ContentType {
     Mod,
@@ -183,6 +210,7 @@ pub async fn run() -> Result<(), CliError> {
         Some(Command::Install(args)) => run_install(args).await,
         Some(Command::Launch(args)) => run_launch(args).await,
         Some(Command::Search(args)) => run_search(args).await,
+        Some(Command::Download(args)) => run_download(args).await,
         Some(Command::Config(args)) => run_config(args.action),
         Some(Command::Gui) | None => gui::run().map_err(CliError::Gui),
     }
@@ -361,6 +389,65 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
     }
     println!();
     println!("{} results, showing {}", result.total_hits, result.hits.len());
+    Ok(())
+}
+
+async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
+    let kind = modrinth::ProjectType::from(args.kind);
+    let game_version = args.minecraft.trim();
+    if game_version.is_empty() {
+        return Err(CliError::Usage("--minecraft must not be empty".to_owned()));
+    }
+    let loader = args.loader.as_deref().map(str::trim).unwrap_or("");
+    if kind == modrinth::ProjectType::Mod && loader.is_empty() {
+        return Err(CliError::Usage(
+            "mods need --loader fabric, quilt, forge or neoforge".to_owned(),
+        ));
+    }
+
+    let target = match args.target {
+        Some(dir) => dir,
+        None => {
+            let config = LauncherConfig::load()?;
+            let base = resolve_minecraft_dir(args.minecraft_dir, &config)?;
+            let isolate = args
+                .instance
+                .as_deref()
+                .map_or(config.isolate, |instance| config.effective_isolate(instance));
+            let game_dir = match args.instance.as_deref() {
+                Some(instance) if isolate => base.join("versions").join(instance),
+                _ => base,
+            };
+            match kind {
+                modrinth::ProjectType::Mod => game_dir.join("mods"),
+                modrinth::ProjectType::ResourcePack => game_dir.join("resourcepacks"),
+                modrinth::ProjectType::ShaderPack => game_dir.join("shaderpacks"),
+                modrinth::ProjectType::DataPack => {
+                    let world = args.world.as_deref().map(str::trim).unwrap_or("");
+                    if world.is_empty() {
+                        return Err(CliError::Usage(
+                            "data packs need --world <save name>".to_owned(),
+                        ));
+                    }
+                    game_dir.join("saves").join(world).join("datapacks")
+                }
+            }
+        }
+    };
+
+    let outcome = match kind {
+        modrinth::ProjectType::Mod => {
+            modrinth::install_with_dependencies(&args.project, game_version, loader, &target).await?
+        }
+        _ => modrinth::install_content(&args.project, game_version, &target).await?,
+    };
+    for installed in &outcome.installed {
+        println!("installed {} ({})", installed.filename, installed.version_number);
+    }
+    println!("saved to {}", target.display());
+    if !outcome.skipped.is_empty() {
+        println!("missing dependencies: {}", outcome.skipped.join(", "));
+    }
     Ok(())
 }
 
