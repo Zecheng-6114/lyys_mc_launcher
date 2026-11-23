@@ -8,7 +8,6 @@ use crate::gui::app::{App, LoaderChoice, Message, Task};
 
 impl App {
     pub(crate) fn install_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t("nav.install"));
         let loader_key = (self.install_loader, self.install_version.trim().to_owned());
         if self.install_loader != LoaderChoice::Vanilla
             && self.loader_versions_key.as_ref() != Some(&loader_key)
@@ -17,140 +16,156 @@ impl App {
             self.loader_versions_key = Some(loader_key);
             self.load_loader_versions(ui.ctx());
         }
-        ui.horizontal(|ui| {
-            ui.label(t("install.version"));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.install_version).id_salt("install_version"),
-            );
-            if ui
-                .add_enabled(!self.versions_loading, egui::Button::new(t("common.refresh_list")))
-                .clicked()
-            {
-                self.reload_versions(ui.ctx());
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.checkbox(
-                &mut self.show_all_versions,
-                t("install.show_all"),
-            );
-            if self.versions_loading {
-                ui.add(egui::widgets::Spinner::new().size(14.0));
-                ui.label(t("install.versions_loading"));
-            } else if let Some(error) = &self.versions_error {
-                ui.label(tf("error.versions_load", &[("error", error.as_str())]));
-            }
-        });
-        if !self.versions.is_empty() {
-            egui::ScrollArea::vertical()
-                .id_salt("install_mc_versions")
-                .max_height(140.0)
-                .show(ui, |ui| {
-                    for version in &self.versions {
-                        if !self.show_all_versions && version.kind != "release" {
-                            continue;
-                        }
-                        let selected = self.install_version == version.id;
+        // 页面整体可滚动，窗口不高时安装按钮也不会被裁掉
+        egui::ScrollArea::vertical()
+            .id_salt("install_page")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(t("install.version"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.install_version)
+                            .id_salt("install_version"),
+                    );
+                    if ui
+                        .add_enabled(
+                            !self.versions_loading,
+                            egui::Button::new(t("common.refresh_list")),
+                        )
+                        .clicked()
+                    {
+                        self.reload_versions(ui.ctx());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.show_all_versions, t("install.show_all"));
+                    if self.versions_loading {
+                        ui.add(egui::widgets::Spinner::new().size(14.0));
+                        ui.label(t("install.versions_loading"));
+                    } else if let Some(error) = &self.versions_error {
+                        ui.label(tf("error.versions_load", &[("error", error.as_str())]));
+                    }
+                });
+                if !self.versions.is_empty() {
+                    egui::ScrollArea::vertical()
+                        .id_salt("install_mc_versions")
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            for version in &self.versions {
+                                if !self.show_all_versions && version.kind != "release" {
+                                    continue;
+                                }
+                                let selected = self.install_version == version.id;
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        format!(
+                                            "{}  ({})",
+                                            version.id,
+                                            version_kind_label(&version.kind)
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.install_version = version.id.clone();
+                                }
+                            }
+                        });
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(t("install.loader"));
+                    egui::ComboBox::from_id_salt("install_loader")
+                        .selected_text(self.install_loader.label())
+                        .show_ui(ui, |ui| {
+                            for choice in LoaderChoice::ALL {
+                                ui.selectable_value(&mut self.install_loader, choice, choice.label());
+                            }
+                        });
+                    if self.install_loader != LoaderChoice::Vanilla {
+                        ui.label(t("install.loader_version"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.install_loader_version)
+                                .id_salt("install_loader_version")
+                                .hint_text(t("common.latest")),
+                        );
                         if ui
-                            .selectable_label(
-                                selected,
-                                format!("{}  ({})", version.id, version.kind),
+                            .add_enabled(
+                                !self.loader_versions_loading,
+                                egui::Button::new(t("common.refresh")),
                             )
                             .clicked()
                         {
-                            self.install_version = version.id.clone();
+                            self.loader_versions_key = Some((
+                                self.install_loader,
+                                self.install_version.trim().to_owned(),
+                            ));
+                            self.reload_loader_versions(ui.ctx());
+                        }
+                        if self.loader_versions_loading {
+                            ui.add(egui::widgets::Spinner::new().size(14.0));
                         }
                     }
                 });
-        }
-        ui.horizontal(|ui| {
-            ui.label(t("install.loader"));
-            egui::ComboBox::from_id_salt("install_loader")
-                .selected_text(self.install_loader.label())
-                .show_ui(ui, |ui| {
-                    for choice in LoaderChoice::ALL {
-                        ui.selectable_value(&mut self.install_loader, choice, choice.label());
+                if self.install_loader != LoaderChoice::Vanilla {
+                    if let Some(error) = &self.loader_versions_error {
+                        ui.label(tf("error.loaders_load", &[("error", error.as_str())]));
+                    }
+                    if self.loader_versions.is_empty() {
+                        if !self.loader_versions_loading && self.loader_versions_error.is_none() {
+                            ui.label(t("install.loader_none"));
+                        }
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("install_loader_versions")
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                for version in &self.loader_versions {
+                                    if ui
+                                        .selectable_label(
+                                            self.install_loader_version == version.as_str(),
+                                            version.as_str(),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.install_loader_version = version.clone();
+                                    }
+                                }
+                            });
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.label(t("settings.minecraft_dir"));
+                    self.dir_picker(ui);
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.installing, egui::Button::new(t("common.install")))
+                        .clicked()
+                    {
+                        self.start_install(ui.ctx());
+                    }
+                    if self.installing {
+                        ui.add(egui::widgets::Spinner::new().size(14.0));
                     }
                 });
-            if self.install_loader != LoaderChoice::Vanilla {
-                ui.label(t("install.loader_version"));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.install_loader_version)
-                        .id_salt("install_loader_version")
-                        .hint_text(t("common.latest")),
-                );
-                if ui
-                    .add_enabled(
-                        !self.loader_versions_loading,
-                        egui::Button::new(t("common.refresh")),
-                    )
-                    .clicked()
-                {
-                    self.loader_versions_key = Some((
-                        self.install_loader,
-                        self.install_version.trim().to_owned(),
+                if let Some(progress) = &self.install_progress {
+                    ui.add_space(6.0);
+                    let downloaded = progress.downloaded.to_string();
+                    let skipped = progress.skipped.to_string();
+                    ui.monospace(tf(
+                        "install.files_summary",
+                        &[
+                            ("downloaded", downloaded.as_str()),
+                            ("skipped", skipped.as_str()),
+                        ],
                     ));
-                    self.reload_loader_versions(ui.ctx());
+                    if let Some(current) = &progress.current {
+                        ui.monospace(tf("install.current", &[("name", current.as_str())]));
+                    }
                 }
-                if self.loader_versions_loading {
-                    ui.add(egui::widgets::Spinner::new().size(14.0));
-                }
-            }
-        });
-        if self.install_loader != LoaderChoice::Vanilla {
-            if let Some(error) = &self.loader_versions_error {
-                ui.label(tf("error.loaders_load", &[("error", error.as_str())]));
-            }
-            if self.loader_versions.is_empty() {
-                if !self.loader_versions_loading && self.loader_versions_error.is_none() {
-                    ui.label(t("install.loader_none"));
-                }
-            } else {
-                egui::ScrollArea::vertical()
-                    .id_salt("install_loader_versions")
-                    .max_height(120.0)
-                    .show(ui, |ui| {
-                        for version in &self.loader_versions {
-                            if ui
-                                .selectable_label(
-                                    self.install_loader_version == version.as_str(),
-                                    version.as_str(),
-                                )
-                                .clicked()
-                            {
-                                self.install_loader_version = version.clone();
-                            }
-                        }
-                    });
-            }
-        }
-        ui.horizontal(|ui| {
-            self.dir_switcher(ui);
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!self.installing, egui::Button::new(t("common.install")))
-                .clicked()
-            {
-                self.start_install(ui.ctx());
-            }
-            if self.installing {
-                ui.add(egui::widgets::Spinner::new().size(14.0));
-            }
-        });
-        if let Some(progress) = &self.install_progress {
-            ui.add_space(6.0);
-            let downloaded = progress.downloaded.to_string();
-            let skipped = progress.skipped.to_string();
-            ui.monospace(tf(
-                "install.files_summary",
-                &[("downloaded", downloaded.as_str()), ("skipped", skipped.as_str())],
-            ));
-            if let Some(current) = &progress.current {
-                ui.monospace(tf("install.current", &[("name", current.as_str())]));
-            }
-        }
+            });
     }
 
     pub(crate) fn reload_versions(&mut self, ctx: &egui::Context) {
@@ -266,5 +281,16 @@ impl App {
             let _ = tx.send(Message::TaskDone(Task::Install));
             ctx.request_repaint();
         });
+    }
+}
+
+/// 版本类型显示名，避免中文界面里直接出现 release / snapshot。
+fn version_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "release" => t("install.kind.release"),
+        "snapshot" => t("install.kind.snapshot"),
+        "old_beta" => t("install.kind.old_beta"),
+        "old_alpha" => t("install.kind.old_alpha"),
+        _ => t("install.kind.other"),
     }
 }

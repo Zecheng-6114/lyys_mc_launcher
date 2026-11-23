@@ -6,7 +6,6 @@ use crate::gui::app::{App, DirPickTarget};
 
 impl App {
     pub(crate) fn settings_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t("nav.settings"));
         let path = config::path()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| t("common.unavailable").to_owned());
@@ -117,37 +116,39 @@ impl App {
             // 选择框打开期间锁住列表，避免结果回来时对不上号
             ui.add_enabled_ui(!picking, |ui| {
                 for (index, dir) in self.config.minecraft_dirs.iter_mut().enumerate() {
-                    ui.group(|ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .radio(Some(index) == active_index, t("settings.dir_active"))
-                                .clicked()
-                            {
-                                activate = Some(index);
-                            }
-                            ui.add(
-                                egui::TextEdit::singleline(&mut dir.name)
-                                    .id_salt(("dir_name", index))
-                                    .hint_text(t("settings.dir_name_hint"))
-                                    .desired_width(110.0),
-                            );
-                            if ui.button(t("settings.browse")).clicked() {
-                                browse = Some(index);
-                            }
-                            if ui
-                                .add_enabled(count > 1, egui::Button::new(t("common.remove")))
-                                .clicked()
-                            {
-                                remove = Some(index);
-                            }
-                        });
+                    // 用分隔线区分每一项，避免外层分组里再套分组
+                    if index > 0 {
+                        ui.separator();
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .radio(Some(index) == active_index, t("settings.dir_active"))
+                            .clicked()
+                        {
+                            activate = Some(index);
+                        }
                         ui.add(
-                            egui::TextEdit::singleline(&mut dir.path)
-                                .id_salt(("dir_path", index))
-                                .hint_text(t("settings.dir_path_hint"))
-                                .desired_width(f32::INFINITY),
+                            egui::TextEdit::singleline(&mut dir.name)
+                                .id_salt(("dir_name", index))
+                                .hint_text(t("settings.dir_name_hint"))
+                                .desired_width(110.0),
                         );
+                        if ui.button(t("settings.browse")).clicked() {
+                            browse = Some(index);
+                        }
+                        if ui
+                            .add_enabled(count > 1, egui::Button::new(t("common.remove")))
+                            .clicked()
+                        {
+                            remove = Some(index);
+                        }
                     });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dir.path)
+                            .id_salt(("dir_path", index))
+                            .hint_text(t("settings.dir_path_hint"))
+                            .desired_width(f32::INFINITY),
+                    );
                 }
                 ui.horizontal_wrapped(|ui| {
                     ui.add(

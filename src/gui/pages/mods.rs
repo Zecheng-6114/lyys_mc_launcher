@@ -17,144 +17,165 @@ use crate::gui::components::buttons::mod_result;
 
 impl App {
     pub(crate) fn mods_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t("content.search"));
         ui.label(egui::RichText::new(t("content.powered_by")).weak());
         let can_switch_type = self.mod_installing.is_none();
-        ui.horizontal(|ui| {
-            ui.label(t("content.type"));
-            ui.add_enabled_ui(can_switch_type, |ui| {
-                for kind in [
-                    ProjectType::Mod,
-                    ProjectType::ResourcePack,
-                    ProjectType::ShaderPack,
-                    ProjectType::DataPack,
-                    ProjectType::Modpack,
-                ] {
-                    if ui
-                        .selectable_value(&mut self.mod_kind, kind, content_label(kind))
-                        .changed()
-                    {
-                        self.mod_page = 1;
-                        self.mod_results.clear();
-                        self.mod_total = 0;
-                        self.mod_updates.clear();
-                        self.installed_mods.clear();
-                        self.installed_mods_dir = String::new();
-                        self.installed_kind = None;
-                    }
-                }
-            });
-        });
-        ui.horizontal(|ui| {
-            ui.label(t("content.query"));
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.mod_query)
-                    .id_salt("mod_query")
-                    .hint_text(t("content.query_hint"))
-                    .desired_width(220.0),
-            );
-            let submitted =
-                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui
-                .add_enabled(!self.mod_searching, egui::Button::new(t("common.search")))
-                .clicked()
-                || submitted
-            {
-                self.start_mod_search(ui.ctx());
-            }
-            if self.mod_searching {
-                ui.add(egui::widgets::Spinner::new().size(14.0));
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label(t("content.minecraft"));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.mod_minecraft_version)
-                    .id_salt("mod_minecraft_version")
-                    .hint_text(t("common.any_lower"))
-                    .desired_width(100.0),
-            );
-            if self.mod_kind == ProjectType::Mod || self.mod_kind == ProjectType::Modpack {
-                ui.label(t("install.loader"));
-                egui::ComboBox::from_id_salt("mod_loader")
-                    .selected_text(self.mod_loader.map(loader_label).unwrap_or(t("common.any")))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.mod_loader, None, t("common.any"));
+        egui::Grid::new("content_filters")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label(t("content.type"));
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_enabled_ui(can_switch_type, |ui| {
                         for kind in [
-                            LoaderKind::Fabric,
-                            LoaderKind::Quilt,
-                            LoaderKind::Forge,
-                            LoaderKind::NeoForge,
+                            ProjectType::Mod,
+                            ProjectType::ResourcePack,
+                            ProjectType::ShaderPack,
+                            ProjectType::DataPack,
+                            ProjectType::Modpack,
                         ] {
-                            ui.selectable_value(
-                                &mut self.mod_loader,
-                                Some(kind),
-                                loader_label(kind),
-                            );
-                        }
-                    });
-            }
-            if self.mod_kind == ProjectType::DataPack {
-                ui.label(t("content.world"));
-                let selected = if self.mod_datapack_world.is_empty() {
-                    t("common.pick").to_owned()
-                } else {
-                    self.mod_datapack_world.clone()
-                };
-                egui::ComboBox::from_id_salt("datapack_world")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        if self.datapack_worlds.is_empty() {
-                            ui.label(t("content.world_none"));
-                        }
-                        for world in &self.datapack_worlds {
-                            ui.selectable_value(&mut self.mod_datapack_world, world.clone(), world);
-                        }
-                    });
-            }
-            if !self.installed.is_empty() && self.mod_kind != ProjectType::Modpack {
-                ui.label(t("content.from_instance"));
-                let mut picked: Option<(String, Option<String>, Option<&'static str>)> = None;
-                egui::ComboBox::from_id_salt("mod_instance")
-                    .selected_text(self.mod_instance_id.as_deref().unwrap_or(t("common.pick")))
-                    .show_ui(ui, |ui| {
-                        for instance in &self.installed {
-                            let label = match (instance.loader, &instance.game_version) {
-                                (Some(tag), Some(version)) => {
-                                    format!("{}  · {tag} {version}", instance.id)
-                                }
-                                (Some(tag), None) => format!("{}  · {tag}", instance.id),
-                                (None, Some(version)) => {
-                                    format!("{}  · {version}", instance.id)
-                                }
-                                (None, None) => instance.id.clone(),
-                            };
                             if ui
-                                .selectable_label(
-                                    self.mod_instance_id.as_deref() == Some(instance.id.as_str()),
-                                    label,
-                                )
-                                .clicked()
+                                .selectable_value(&mut self.mod_kind, kind, content_label(kind))
+                                .changed()
                             {
-                                picked = Some((
-                                    instance.id.clone(),
-                                    instance.game_version.clone(),
-                                    instance.loader,
-                                ));
+                                self.mod_page = 1;
+                                self.mod_results.clear();
+                                self.mod_total = 0;
+                                self.mod_updates.clear();
+                                self.installed_mods.clear();
+                                self.installed_mods_dir = String::new();
+                                self.installed_kind = None;
                             }
                         }
                     });
-                if let Some((id, version, tag)) = picked {
-                    self.mod_instance_id = Some(id);
-                    if let Some(version) = version {
-                        self.mod_minecraft_version = version;
+                });
+                ui.end_row();
+
+                ui.label(t("content.query"));
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.mod_query)
+                            .id_salt("mod_query")
+                            .hint_text(t("content.query_hint"))
+                            .desired_width(220.0),
+                    );
+                    let submitted = response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui
+                        .add_enabled(!self.mod_searching, egui::Button::new(t("common.search")))
+                        .clicked()
+                        || submitted
+                    {
+                        self.start_mod_search(ui.ctx());
                     }
-                    if let Some(tag) = tag {
-                        self.mod_loader = loader_kind(tag);
+                    if self.mod_searching {
+                        ui.add(egui::widgets::Spinner::new().size(14.0));
                     }
-                }
-            }
-        });
+                });
+                ui.end_row();
+
+                ui.label(t("content.minecraft"));
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.mod_minecraft_version)
+                            .id_salt("mod_minecraft_version")
+                            .hint_text(t("common.any_lower"))
+                            .desired_width(100.0),
+                    );
+                    if self.mod_kind == ProjectType::Mod || self.mod_kind == ProjectType::Modpack {
+                        ui.label(t("install.loader"));
+                        egui::ComboBox::from_id_salt("mod_loader")
+                            .width(110.0)
+                            .selected_text(
+                                self.mod_loader.map(loader_label).unwrap_or(t("common.any")),
+                            )
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.mod_loader, None, t("common.any"));
+                                for kind in [
+                                    LoaderKind::Fabric,
+                                    LoaderKind::Quilt,
+                                    LoaderKind::Forge,
+                                    LoaderKind::NeoForge,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.mod_loader,
+                                        Some(kind),
+                                        loader_label(kind),
+                                    );
+                                }
+                            });
+                    }
+                    if self.mod_kind == ProjectType::DataPack {
+                        ui.label(t("content.world"));
+                        let selected = if self.mod_datapack_world.is_empty() {
+                            t("common.pick").to_owned()
+                        } else {
+                            self.mod_datapack_world.clone()
+                        };
+                        egui::ComboBox::from_id_salt("datapack_world")
+                            .width(160.0)
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                if self.datapack_worlds.is_empty() {
+                                    ui.label(t("content.world_none"));
+                                }
+                                for world in &self.datapack_worlds {
+                                    ui.selectable_value(
+                                        &mut self.mod_datapack_world,
+                                        world.clone(),
+                                        world,
+                                    );
+                                }
+                            });
+                    }
+                    if !self.installed.is_empty() && self.mod_kind != ProjectType::Modpack {
+                        ui.label(t("content.from_instance"));
+                        let mut picked: Option<(String, Option<String>, Option<&'static str>)> = None;
+                        egui::ComboBox::from_id_salt("mod_instance")
+                            .width(220.0)
+                            .selected_text(
+                                self.mod_instance_id.as_deref().unwrap_or(t("common.pick")),
+                            )
+                            .show_ui(ui, |ui| {
+                                for instance in &self.installed {
+                                    let label = match (instance.loader, &instance.game_version) {
+                                        (Some(tag), Some(version)) => {
+                                            format!("{}  · {tag} {version}", instance.id)
+                                        }
+                                        (Some(tag), None) => format!("{}  · {tag}", instance.id),
+                                        (None, Some(version)) => {
+                                            format!("{}  · {version}", instance.id)
+                                        }
+                                        (None, None) => instance.id.clone(),
+                                    };
+                                    if ui
+                                        .selectable_label(
+                                            self.mod_instance_id.as_deref()
+                                                == Some(instance.id.as_str()),
+                                            label,
+                                        )
+                                        .clicked()
+                                    {
+                                        picked = Some((
+                                            instance.id.clone(),
+                                            instance.game_version.clone(),
+                                            instance.loader,
+                                        ));
+                                    }
+                                }
+                            });
+                        if let Some((id, version, tag)) = picked {
+                            self.mod_instance_id = Some(id);
+                            if let Some(version) = version {
+                                self.mod_minecraft_version = version;
+                            }
+                            if let Some(tag) = tag {
+                                self.mod_loader = loader_kind(tag);
+                            }
+                        }
+                    }
+                });
+                ui.end_row();
+            });
         if let Some(error) = &self.mod_error {
             ui.label(tf("error.prefix", &[("message", error.as_str())]));
         }
@@ -165,7 +186,6 @@ impl App {
         let target_dir = self.content_dir(self.mod_kind);
         if self.mod_kind == ProjectType::Modpack {
             self.modpack_form(ui);
-            ui.separator();
         } else {
             if self.mod_kind == ProjectType::DataPack
                 && self.datapack_worlds_dir != game_dir.display().to_string()

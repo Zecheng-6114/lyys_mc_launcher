@@ -10,75 +10,80 @@ use crate::gui::app::{App, Message, Task};
 
 impl App {
     pub(crate) fn launch_page(&mut self, ui: &mut egui::Ui) {
-        ui.heading(t("nav.launch"));
-        ui.horizontal(|ui| {
-            self.dir_switcher(ui);
-            if ui.button(t("launch.scan")).clicked() {
-                self.scan_installed();
-            }
-        });
-        if let Some(error) = &self.installed_error {
-            ui.label(tf("error.scan_failed", &[("error", error.as_str())]));
-        }
-        if self.installed.is_empty() {
-            ui.label(t("launch.none"));
-        } else {
-            ui.label(t("launch.instances"));
-            egui::ScrollArea::vertical()
-                .id_salt("launch_instances")
-                .max_height(160.0)
-                .show(ui, |ui| {
-                    for instance in &self.installed {
-                        let label = match instance.loader {
-                            Some(tag) => format!("{}  · {tag}", instance.id),
-                            None => instance.id.clone(),
-                        };
-                        if ui
-                            .selectable_label(self.launch_version == instance.id, label)
-                            .clicked()
-                        {
-                            self.launch_version = instance.id.clone();
-                        }
+        egui::ScrollArea::vertical()
+            .id_salt("launch_page")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(t("settings.minecraft_dir"));
+                    self.dir_picker(ui);
+                    if ui.button(t("launch.scan")).clicked() {
+                        self.scan_installed();
                     }
                 });
-        }
-        let selected = self.launch_version.trim().to_owned();
-        if !selected.is_empty() {
-            let isolate = self.effective_isolate(&selected);
-            let source = if self.instance_uses_global(&selected) {
-                t("common.global")
-            } else {
-                t("common.instance")
-            };
-            let java = self
-                .effective_java(&selected)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| t("settings.java.auto").to_owned());
-            let isolation = if isolate { t("common.on") } else { t("common.off") };
-            ui.label(
-                egui::RichText::new(tf(
-                    "launch.java_summary",
-                    &[("java", java.as_str()), ("isolation", isolation), ("source", source)],
-                ))
-                .weak()
-                .small(),
-            );
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    !self.launching && !self.launch_version.trim().is_empty(),
-                    egui::Button::new(t("common.launch")),
-                )
-                .clicked()
-            {
-                self.start_launch(ui.ctx());
-            }
-            if self.launching {
-                ui.add(egui::widgets::Spinner::new().size(14.0));
-            }
-        });
+                if let Some(error) = &self.installed_error {
+                    ui.label(tf("error.scan_failed", &[("error", error.as_str())]));
+                }
+                if self.installed.is_empty() {
+                    ui.label(t("launch.none"));
+                } else {
+                    ui.label(t("launch.instances"));
+                    egui::ScrollArea::vertical()
+                        .id_salt("launch_instances")
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for instance in &self.installed {
+                                let label = match instance.loader {
+                                    Some(tag) => format!("{}  · {tag}", instance.id),
+                                    None => instance.id.clone(),
+                                };
+                                if ui
+                                    .selectable_label(self.launch_version == instance.id, label)
+                                    .clicked()
+                                {
+                                    self.launch_version = instance.id.clone();
+                                }
+                            }
+                        });
+                }
+                let selected = self.launch_version.trim().to_owned();
+                if !selected.is_empty() {
+                    let isolate = self.effective_isolate(&selected);
+                    let source = if self.instance_uses_global(&selected) {
+                        t("common.global")
+                    } else {
+                        t("common.instance")
+                    };
+                    let java = self
+                        .effective_java(&selected)
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| t("settings.java.auto").to_owned());
+                    let isolation = if isolate { t("common.on") } else { t("common.off") };
+                    ui.label(
+                        egui::RichText::new(tf(
+                            "launch.java_summary",
+                            &[("java", java.as_str()), ("isolation", isolation), ("source", source)],
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !self.launching && !self.launch_version.trim().is_empty(),
+                            egui::Button::new(t("common.launch")),
+                        )
+                        .clicked()
+                    {
+                        self.start_launch(ui.ctx());
+                    }
+                    if self.launching {
+                        ui.add(egui::widgets::Spinner::new().size(14.0));
+                    }
+                });
+            });
     }
 
     pub(crate) fn start_launch(&mut self, ctx: &egui::Context) {

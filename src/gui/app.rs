@@ -559,9 +559,8 @@ impl App {
         });
     }
 
-    /// Minecraft 目录切换器，安装页和启动页共用。
-    pub(crate) fn dir_switcher(&mut self, ui: &mut egui::Ui) {
-        ui.label(t("settings.minecraft_dir"));
+    /// 目录下拉框与浏览按钮，安装页和启动页共用；标签由调用方摆放，方便对齐表单。
+    pub(crate) fn dir_picker(&mut self, ui: &mut egui::Ui) {
         let current = self
             .config
             .active_dir()
@@ -588,16 +587,20 @@ impl App {
             .map(|(_, label)| label.clone())
             .unwrap_or_else(|| current.clone());
         let mut selected = current.clone();
-        egui::ComboBox::from_id_salt("active_minecraft_dir")
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                for (path, label) in &choices {
-                    ui.selectable_value(&mut selected, path.clone(), label);
-                }
-            });
-        if ui.button(t("settings.browse")).clicked() {
-            self.request_dir_pick(DirPickTarget::Switch, ui.ctx());
-        }
+        ui.horizontal(|ui| {
+            // 限宽，避免长路径把整行控件顶出可见区域
+            egui::ComboBox::from_id_salt("active_minecraft_dir")
+                .width(260.0)
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for (path, label) in &choices {
+                        ui.selectable_value(&mut selected, path.clone(), label);
+                    }
+                });
+            if ui.button(t("settings.browse")).clicked() {
+                self.request_dir_pick(DirPickTarget::Switch, ui.ctx());
+            }
+        });
         if selected != current {
             self.use_dir(&selected);
         }
@@ -941,9 +944,10 @@ impl eframe::App for App {
         self.accounts_panel(ui);
 
         egui::Panel::bottom("log")
-            .resizable(false)
-            .min_size(120.0)
-            .max_size(120.0)
+            .resizable(true)
+            .default_size(120.0)
+            .min_size(60.0)
+            .max_size(260.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
