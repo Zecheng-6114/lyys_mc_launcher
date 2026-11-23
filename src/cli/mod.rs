@@ -200,7 +200,7 @@ struct ModpackArgs {
 
 #[derive(Subcommand)]
 enum ModpackAction {
-    /// Install a modpack from a .mrpack, CurseForge, MCBBS or server pack archive.
+    /// Install a modpack from a .mrpack, CurseForge or server pack archive.
     Install(ModpackInstallArgs),
     /// Print what a modpack archive contains without installing it.
     Info { file: PathBuf },

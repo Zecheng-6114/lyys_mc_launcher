@@ -152,7 +152,6 @@
   "{}: use global configuration": "{}: グローバル設定を使用",
   "Install modpack": "Modpackをインストール",
   "Modpack file:": "Modpackファイル:",
-  "path to a .mrpack, CurseForge, MCBBS or server pack archive": ".mrpack、CurseForge、MCBBS、サーバーパックのアーカイブに対応",
   "Include optional files": "オプションのファイルも含める",
   "installing modpack...": "Modpackをインストールしています…",
   "modpack installed: {}": "Modpackをインストールしました: {}",
@@ -177,5 +176,6 @@
   "Minecraft installed in {}": "Minecraft のインストール {}",
   "loader installed in {}": "ローダーのインストール {}",
   "files downloaded in {}": "ファイルのダウンロード {}",
-  "overrides extracted in {}": "上書きファイルの展開 {}"
+  "overrides extracted in {}": "上書きファイルの展開 {}",
+  "path to a .mrpack, CurseForge or server pack archive": ".mrpack、CurseForge、サーバーパックのアーカイブに対応"
 }

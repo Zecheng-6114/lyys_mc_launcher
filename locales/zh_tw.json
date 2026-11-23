@@ -152,7 +152,6 @@
   "{}: use global configuration": "{}：使用全域設定",
   "Install modpack": "安裝整合包",
   "Modpack file:": "整合包檔案：",
-  "path to a .mrpack, CurseForge, MCBBS or server pack archive": "支援 .mrpack、CurseForge、MCBBS 或伺服器整合包壓縮檔",
   "Include optional files": "包含可選檔案",
   "installing modpack...": "正在安裝整合包…",
   "modpack installed: {}": "整合包已安裝：{}",
@@ -177,5 +176,6 @@
   "Minecraft installed in {}": "Minecraft 安裝 {}",
   "loader installed in {}": "載入器安裝 {}",
   "files downloaded in {}": "檔案下載 {}",
-  "overrides extracted in {}": "覆寫解壓 {}"
+  "overrides extracted in {}": "覆寫解壓 {}",
+  "path to a .mrpack, CurseForge or server pack archive": "支援 .mrpack、CurseForge 或伺服器整合包壓縮檔"
 }

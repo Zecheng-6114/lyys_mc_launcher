@@ -1,9 +1,8 @@
 //! 整合包（modpack）解析与安装。
 //!
-//! 支持的格式：Modrinth `.mrpack`、CurseForge 整合包 zip、MCBBS 整合包、服务端整合包。
+//! 支持的格式：Modrinth `.mrpack`、CurseForge 整合包 zip、服务端整合包。
 
 mod curseforge;
-mod mcbbs;
 mod modrinth;
 mod server;
 
@@ -55,7 +54,6 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 pub enum Provider {
     Modrinth,
     CurseForge,
-    Mcbbs,
     Server,
 }
 
@@ -64,7 +62,6 @@ impl Provider {
         match self {
             Self::Modrinth => "modrinth",
             Self::CurseForge => "curseforge",
-            Self::Mcbbs => "mcbbs",
             Self::Server => "server",
         }
     }
@@ -196,7 +193,7 @@ impl PackProgress {
 pub struct InstallTimings {
     /// 整合包解析（识别格式 + 读取清单）。
     pub manifest: Duration,
-    /// 元数据解析（CurseForge / MCBBS 的联网查询）。
+    /// 元数据解析（CurseForge 的联网查询）。
     pub metadata: Duration,
     /// Minecraft 本体安装。
     pub minecraft: Duration,
@@ -425,13 +422,6 @@ pub fn detect(path: &Path) -> Result<Detected, ModpackError> {
                 manifest_name: "modrinth.index.json".to_owned(),
             });
         }
-        if name_set.contains(format!("{prefix}mcbbs.packmeta").as_str()) {
-            return Ok(Detected {
-                provider: Provider::Mcbbs,
-                prefix,
-                manifest_name: "mcbbs.packmeta".to_owned(),
-            });
-        }
         if name_set.contains(format!("{prefix}server-manifest.json").as_str()) {
             return Ok(Detected {
                 provider: Provider::Server,
@@ -447,13 +437,6 @@ pub fn detect(path: &Path) -> Result<Detected, ModpackError> {
             if json["minecraft"].is_object() {
                 return Ok(Detected {
                     provider: Provider::CurseForge,
-                    prefix,
-                    manifest_name: "manifest.json".to_owned(),
-                });
-            }
-            if json.get("addons").is_some() || json.get("launchInfo").is_some() {
-                return Ok(Detected {
-                    provider: Provider::Mcbbs,
                     prefix,
                     manifest_name: "manifest.json".to_owned(),
                 });
@@ -496,7 +479,6 @@ async fn parse_manifest(
     match provider {
         Provider::Modrinth => modrinth::parse(json),
         Provider::CurseForge => curseforge::parse(json).await,
-        Provider::Mcbbs => mcbbs::parse(json).await,
         Provider::Server => server::parse(json),
     }
 }

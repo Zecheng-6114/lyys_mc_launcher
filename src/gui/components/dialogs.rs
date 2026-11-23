@@ -8,7 +8,7 @@ impl App {
         let ctx = ui.ctx().clone();
         ui.label(
             egui::RichText::new(t(
-                "path to a .mrpack, CurseForge, MCBBS or server pack archive",
+                "path to a .mrpack, CurseForge or server pack archive",
             ))
             .weak()
             .small(),
