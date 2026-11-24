@@ -10,10 +10,11 @@ impl App {
         egui::Panel::top("accounts").show(ui, |ui| {
             ui.add_space(6.0);
             ui.heading(t("accounts.title"));
-            for index in 0..self.accounts.len() {
-                let uuid = self.accounts[index].profile.id.clone();
-                let name = self.accounts[index].profile.name.clone();
-                let state = self.accounts[index].state;
+            let accounts = self.accounts.clone();
+            for account in &accounts {
+                let uuid = account.profile.id.clone();
+                let name = account.profile.name.clone();
+                let state = account.state;
                 let is_active = self.active.as_deref() == Some(uuid.as_str());
                 ui.horizontal(|ui| {
                     if ui.selectable_label(is_active, name).clicked() {
