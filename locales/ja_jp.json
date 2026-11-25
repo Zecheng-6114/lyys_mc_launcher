@@ -147,6 +147,7 @@
   "install.loader_none": "互換性のあるローダーバージョンが見つかりません",
   "install.loader_version": "ローダーバージョン:",
   "install.need_version": "先にバージョンを入力してください",
+  "install.section.content": "リソースをインストール",
   "install.show_all": "スナップショットと旧バージョンを表示",
   "install.summary": "{downloaded} 個のファイルをダウンロード、{skipped} 個をスキップ",
   "install.version": "バージョン:",
@@ -179,7 +180,7 @@
   "modpack.timing.minecraft": "Minecraft のインストール {duration}",
   "modpack.timing.overrides": "上書きファイルの展開 {duration}",
 
-  "nav.content": "コンテンツ",
+  "nav.content": "インストール",
   "nav.install": "インスタンスをインストール",
   "nav.launch": "インスタンスを起動",
   "nav.settings": "設定",

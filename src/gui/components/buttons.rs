@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::core::i18n::{t, tf};
-use crate::core::modrinth::{ModSearchHit, ProjectType};
+use crate::core::modrinth::{self, ModSearchHit, ProjectType};
 use crate::gui::app::ModAction;
 
 pub(crate) fn mod_result(
@@ -20,9 +20,13 @@ pub(crate) fn mod_result(
     ui.group(|ui| {
         ui.horizontal_top(|ui| {
             if let Some(icon_url) = &hit.icon_url {
-                ui.add(
-                    egui::Image::new(icon_url.as_str()).fit_to_exact_size(egui::vec2(48.0, 48.0)),
-                );
+                let image = match modrinth::icon_cache_path(icon_url)
+                    .filter(|path| path.is_file())
+                {
+                    Some(path) => egui::Image::from_uri(file_uri(&path)),
+                    None => egui::Image::new(icon_url.as_str()),
+                };
+                ui.add(image.fit_to_exact_size(egui::vec2(48.0, 48.0)));
             }
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -124,4 +128,15 @@ pub(crate) fn mod_result(
     });
     ui.add_space(4.0);
     action
+}
+
+/// 把本地缓存路径转成 egui 文件加载器支持的 `file://` URI。
+fn file_uri(path: &std::path::Path) -> String {
+    let raw = path.display().to_string();
+    if raw.starts_with('/') {
+        format!("file://{raw}")
+    } else {
+        // Windows 绝对路径需要 `file:///C:/...` 形式
+        format!("file:///{}", raw.replace('\\', "/"))
+    }
 }

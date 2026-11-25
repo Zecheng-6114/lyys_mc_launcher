@@ -147,6 +147,7 @@
   "install.loader_none": "no compatible loader version found",
   "install.loader_version": "Loader version:",
   "install.need_version": "enter a version first",
+  "install.section.content": "Install resources",
   "install.show_all": "Show snapshots and old versions",
   "install.summary": "downloaded {downloaded} files, skipped {skipped}",
   "install.version": "Version:",
@@ -179,7 +180,7 @@
   "modpack.timing.minecraft": "Minecraft installed in {duration}",
   "modpack.timing.overrides": "overrides extracted in {duration}",
 
-  "nav.content": "Content",
+  "nav.content": "Install",
   "nav.install": "Install instance",
   "nav.launch": "Launch instance",
   "nav.settings": "Settings",

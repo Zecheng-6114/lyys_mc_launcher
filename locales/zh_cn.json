@@ -147,6 +147,7 @@
   "install.loader_none": "没有找到兼容的加载器版本",
   "install.loader_version": "加载器版本：",
   "install.need_version": "请先填写版本",
+  "install.section.content": "安装资源",
   "install.show_all": "显示快照和旧版本",
   "install.summary": "已下载 {downloaded} 个文件，跳过 {skipped} 个",
   "install.version": "版本：",
@@ -179,7 +180,7 @@
   "modpack.timing.minecraft": "Minecraft 安装 {duration}",
   "modpack.timing.overrides": "覆盖解压 {duration}",
 
-  "nav.content": "内容",
+  "nav.content": "安装",
   "nav.install": "安装实例",
   "nav.launch": "启动实例",
   "nav.settings": "设置",

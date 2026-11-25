@@ -82,8 +82,14 @@ pub(crate) enum DirPickTarget {
 pub(crate) enum Page {
     Install,
     Launch,
-    Mods,
     Settings,
+}
+
+/// 安装页内的两个区：安装实例与安装内容。
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub(crate) enum InstallSection {
+    Instance,
+    Content,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -203,6 +209,7 @@ pub(crate) struct App {
     pub(crate) active: Option<String>,
     pub(crate) offline_name: String,
     pub(crate) page: Page,
+    pub(crate) install_section: InstallSection,
     // 安装实例
     pub(crate) install_version: String,
     /// 设置页里正在输入的待添加目录。
@@ -293,7 +300,8 @@ impl App {
             accounts: Vec::new(),
             active: None,
             offline_name: String::new(),
-            page: Page::Install,
+            page: Page::Launch,
+            install_section: InstallSection::Instance,
             install_version: String::new(),
             new_dir_path: String::new(),
             dir_picking: false,
@@ -821,6 +829,7 @@ impl eframe::App for App {
                             self.mod_results = result.hits;
                             self.mod_total = result.total_hits;
                             self.mod_error = None;
+                            self.cache_result_icons(&ctx);
                         }
                         Err(error) => self.mod_error = Some(error),
                     }
@@ -965,7 +974,6 @@ impl eframe::App for App {
             match self.page {
                 Page::Install => self.install_page(ui),
                 Page::Launch => self.launch_page(ui),
-                Page::Mods => self.mods_page(ui),
                 Page::Settings => self.settings_page(ui),
             }
         });

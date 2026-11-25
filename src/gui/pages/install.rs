@@ -4,10 +4,31 @@ use eframe::egui;
 
 use crate::core::i18n::{t, tf};
 use crate::core::install::{self, InstallProgress};
-use crate::gui::app::{App, LoaderChoice, Message, Task};
+use crate::gui::app::{App, InstallSection, LoaderChoice, Message, Task};
 
 impl App {
+    /// 安装页入口：在「安装实例」与「安装内容」两个区之间切换。
     pub(crate) fn install_page(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.install_section,
+                InstallSection::Instance,
+                t("nav.install"),
+            );
+            ui.selectable_value(
+                &mut self.install_section,
+                InstallSection::Content,
+                t("install.section.content"),
+            );
+        });
+        ui.separator();
+        match self.install_section {
+            InstallSection::Instance => self.instance_install_page(ui),
+            InstallSection::Content => self.mods_page(ui),
+        }
+    }
+
+    pub(crate) fn instance_install_page(&mut self, ui: &mut egui::Ui) {
         let loader_key = (self.install_loader, self.install_version.trim().to_owned());
         if self.install_loader != LoaderChoice::Vanilla
             && self.loader_versions_key.as_ref() != Some(&loader_key)

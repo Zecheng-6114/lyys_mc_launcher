@@ -717,6 +717,33 @@ impl App {
         self.request_mod_page(page, ctx);
     }
 
+    /// 把当前搜索结果里的图标下载到本地缓存，已缓存的跳过；每张成功后刷新界面。
+    pub(crate) fn cache_result_icons(&mut self, ctx: &egui::Context) {
+        let mut urls: Vec<String> = Vec::new();
+        for hit in &self.mod_results {
+            let Some(url) = &hit.icon_url else {
+                continue;
+            };
+            if modrinth::icon_cache_path(url).is_some_and(|path| path.is_file()) {
+                continue;
+            }
+            if !urls.iter().any(|cached| cached == url) {
+                urls.push(url.clone());
+            }
+        }
+        if urls.is_empty() {
+            return;
+        }
+        let ctx = ctx.clone();
+        self.handle.spawn(async move {
+            for url in urls {
+                if modrinth::cache_icon(&url).await.is_ok() {
+                    ctx.request_repaint();
+                }
+            }
+        });
+    }
+
     pub(crate) fn start_mod_install(
         &mut self,
         project: String,

@@ -1,8 +1,12 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashSet, VecDeque};
-use std::path::Path;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::core::config;
 
 const SEARCH_URL: &str = "https://api.modrinth.com/v2/search";
 const VERSION_URL: &str = "https://api.modrinth.com/v2/version";
@@ -366,6 +370,58 @@ pub async fn latest_version(
         .into_iter()
         .next()
         .map(|version| (version.id, version.version_number)))
+}
+
+/// 远程图标的本地缓存路径；缓存目录不可用时返回 `None`。
+///
+/// 文件名用 URL 哈希，保留原扩展名让加载器按格式解码。
+pub fn icon_cache_path(icon_url: &str) -> Option<PathBuf> {
+    let mut hasher = DefaultHasher::new();
+    icon_url.hash(&mut hasher);
+    let stem = format!("{:016x}", hasher.finish());
+    let file_name = match image_extension(icon_url) {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
+    };
+    Some(config::cache_dir().ok()?.join("icons").join(file_name))
+}
+
+/// 把远程图标下载到缓存文件，已缓存时跳过。
+pub async fn cache_icon(icon_url: &str) -> Result<(), ModrinthError> {
+    let Some(path) = icon_cache_path(icon_url) else {
+        return Ok(());
+    };
+    if path.is_file() {
+        return Ok(());
+    }
+    let bytes = client()?
+        .get(icon_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // 界面在写入过程中读到残缺文件会缓存解码失败，因此先写临时文件再原子改名。
+    let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("icon");
+    let temp = path.with_file_name(format!("{stem}.{}.part", std::process::id()));
+    std::fs::write(&temp, bytes)?;
+    if let Err(error) = std::fs::rename(&temp, &path) {
+        let _ = std::fs::remove_file(&temp);
+        // 并发下载同一图标时目标可能已存在，此时缓存已就绪
+        if !path.is_file() {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+fn image_extension(url: &str) -> Option<String> {
+    let name = url.rsplit('/').next()?.split(['?', '#']).next()?;
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif").then_some(ext)
 }
 
 async fn fetch_versions(

@@ -147,6 +147,7 @@
   "install.loader_none": "找不到相容的載入器版本",
   "install.loader_version": "載入器版本：",
   "install.need_version": "請先填寫版本",
+  "install.section.content": "安裝資源",
   "install.show_all": "顯示快照與舊版本",
   "install.summary": "已下載 {downloaded} 個檔案，略過 {skipped} 個",
   "install.version": "版本：",
@@ -179,7 +180,7 @@
   "modpack.timing.minecraft": "Minecraft 安裝 {duration}",
   "modpack.timing.overrides": "覆寫解壓 {duration}",
 
-  "nav.content": "內容",
+  "nav.content": "安裝",
   "nav.install": "安裝實例",
   "nav.launch": "啟動實例",
   "nav.settings": "設定",

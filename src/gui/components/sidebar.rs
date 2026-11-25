@@ -84,9 +84,8 @@ impl App {
 
     pub(crate) fn page_tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.page, Page::Install, t("nav.install"));
             ui.selectable_value(&mut self.page, Page::Launch, t("nav.launch"));
-            ui.selectable_value(&mut self.page, Page::Mods, t("nav.content"));
+            ui.selectable_value(&mut self.page, Page::Install, t("nav.content"));
             ui.selectable_value(&mut self.page, Page::Settings, t("nav.settings"));
         });
     }
