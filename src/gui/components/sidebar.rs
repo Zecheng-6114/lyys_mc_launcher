@@ -2,6 +2,7 @@ use eframe::egui;
 
 use crate::core::auth::SessionState;
 use crate::core::i18n::{t, tf};
+use crate::core::logging;
 use crate::gui::app::{App, Page};
 
 impl App {
@@ -21,6 +22,7 @@ impl App {
                         match self.auth.set_active(&uuid) {
                             Ok(()) => self.active = Some(uuid.clone()),
                             Err(error) => {
+                                logging::error("auth", &error.to_string());
                                 let detail = error.message();
                                 self.log.push(tf(
                                     "error.account_active",
@@ -39,6 +41,7 @@ impl App {
                         match self.auth.remove(&uuid) {
                             Ok(()) => self.reload_accounts(),
                             Err(error) => {
+                                logging::error("auth", &error.to_string());
                                 let detail = error.message();
                                 self.log.push(tf(
                                     "error.account_remove",
@@ -64,6 +67,7 @@ impl App {
                             self.reload_accounts();
                         }
                         Err(error) => {
+                            logging::error("auth", &error.to_string());
                             let detail = error.message();
                             self.log
                                 .push(tf("error.account_add", &[("error", detail.as_str())]));

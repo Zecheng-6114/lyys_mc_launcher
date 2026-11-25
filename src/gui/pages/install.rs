@@ -4,6 +4,7 @@ use eframe::egui;
 
 use crate::core::i18n::{t, tf};
 use crate::core::install::{self, InstallProgress};
+use crate::core::logging;
 use crate::gui::app::{App, InstallSection, LoaderChoice, Message, Task};
 
 impl App {
@@ -276,6 +277,12 @@ impl App {
                         &mut reporter,
                     ) {
                         Ok(result) => {
+                            logging::info(&format!(
+                                "installed {} {} into {}",
+                                loader_name,
+                                result.version_id,
+                                dir.display()
+                            ));
                             tf(
                                 "install.installed",
                                 &[
@@ -286,14 +293,22 @@ impl App {
                         }
                         Err(error) => {
                             let error = error.to_string();
+                            logging::error("install", &error);
                             tf("error.install_failed", &[("error", error.as_str())])
                         }
                     }
                 }
                 None => match install::install_with_reporter(&dir, &version, &mut reporter) {
-                    Ok(_) => tf("install.installed_only", &[("version", version.as_str())]),
+                    Ok(_) => {
+                        logging::info(&format!(
+                            "installed {version} into {}",
+                            dir.display()
+                        ));
+                        tf("install.installed_only", &[("version", version.as_str())])
+                    }
                     Err(error) => {
                         let error = error.to_string();
+                        logging::error("install", &error);
                         tf("error.install_failed", &[("error", error.as_str())])
                     }
                 },

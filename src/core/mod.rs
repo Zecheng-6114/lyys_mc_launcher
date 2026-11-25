@@ -4,5 +4,6 @@ pub mod i18n;
 pub mod install;
 pub mod java;
 pub mod launch;
+pub mod logging;
 pub mod modpack;
 pub mod modrinth;

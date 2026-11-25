@@ -14,6 +14,7 @@ use crate::core::config::{DEFAULT_MINECRAFT_DIR, LauncherConfig};
 use crate::core::i18n::{self, Language, t, tf};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
 use crate::core::java::{self, JavaRuntime};
+use crate::core::logging;
 use crate::core::modpack;
 use crate::core::modrinth::{InstallOutcome, ModSearchHit, ModSearchResult, ProjectType};
 
@@ -150,7 +151,10 @@ impl LoaderChoice {
 }
 
 pub fn run() -> Result<(), String> {
-    let auth = Auth::new().map_err(|error| error.to_string())?;
+    let auth = Auth::new().map_err(|error| {
+        logging::error("auth", &error.to_string());
+        error.to_string()
+    })?;
     let handle = Handle::current();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([880.0, 620.0]),
@@ -164,7 +168,10 @@ pub fn run() -> Result<(), String> {
             Ok(Box::new(App::new(auth, handle)))
         }),
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| {
+        logging::error("gui", &error.to_string());
+        error.to_string()
+    })
 }
 
 #[derive(Clone)]
@@ -289,8 +296,14 @@ impl App {
         config.normalize();
         let language = Language::from_code(&config.language).unwrap_or_else(Language::detect);
         i18n::set_language(language);
+        logging::info(&format!(
+            "gui started, launcher {}, terminal language {}",
+            env!("CARGO_PKG_VERSION"),
+            language.code()
+        ));
         let config_status = load_error.map(|error| {
             let error = error.to_string();
+            logging::error("config", &error);
             tf("error.config_load", &[("error", error.as_str())])
         });
         // 留空表示启动时按游戏版本自动匹配本机 Java
@@ -382,6 +395,7 @@ impl App {
             }
             (Err(error), _) | (_, Err(error)) => {
                 let error = error.to_string();
+                logging::error("auth", &error);
                 self.log
                     .push(tf("error.accounts_read", &[("error", error.as_str())]));
             }
@@ -532,6 +546,7 @@ impl App {
             }
             Err(error) => {
                 let error = error.to_string();
+                logging::error("config", &error);
                 self.config_status = Some(tf("error.save_failed", &[("error", error.as_str())]));
             }
         }
@@ -630,6 +645,7 @@ impl App {
             }
             Err(error) => {
                 let error = error.to_string();
+                logging::error("config", &error);
                 self.config_status = Some(tf("error.save_failed", &[("error", error.as_str())]));
             }
         }
@@ -654,11 +670,15 @@ impl App {
                 })
                 .await;
             let line = match result {
-                Ok(session) => tf(
-                    "gui.login.logged_in",
-                    &[("name", session.profile.name.as_str())],
-                ),
+                Ok(session) => {
+                    logging::info(&format!("logged in as {}", session.profile.name));
+                    tf(
+                        "gui.login.logged_in",
+                        &[("name", session.profile.name.as_str())],
+                    )
+                }
                 Err(error) => {
+                    logging::error("auth", &error.to_string());
                     let detail = error.message();
                     tf("error.login_failed", &[("error", detail.as_str())])
                 }
@@ -744,6 +764,11 @@ impl eframe::App for App {
                     match result {
                         Ok(report) => {
                             let version = report.version_id.clone();
+                            logging::info(&format!(
+                                "installed modpack as version {} in {}",
+                                version,
+                                dir.display()
+                            ));
                             self.modpack_notice =
                                 Some(tf("modpack.installed", &[("version", version.as_str())]));
                             self.log
@@ -756,6 +781,7 @@ impl eframe::App for App {
                             self.scan_installed();
                         }
                         Err(error) => {
+                            logging::error("modpack", &error);
                             let line =
                                 tf("error.modpack_failed", &[("error", error.as_str())]);
                             self.modpack_error = Some(line.clone());
@@ -922,6 +948,11 @@ impl eframe::App for App {
                                 ));
                             }
                             self.mod_notice = Some(notice);
+                            logging::info(&format!(
+                                "installed {} file(s) into {}",
+                                outcome.installed.len(),
+                                dir.display()
+                            ));
                         }
                         Err(error) => self.mod_error = Some(error),
                     }

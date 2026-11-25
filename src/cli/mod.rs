@@ -11,6 +11,7 @@ use crate::core::config::{self, ConfigError, InstanceConfig, LauncherConfig};
 use crate::core::i18n::{self, t, tf};
 use crate::core::install;
 use crate::core::java;
+use crate::core::logging;
 use crate::core::launch::{self, LaunchAccount, LaunchError, LaunchRequest};
 use crate::core::modpack::{self, InstallOptions, PackProgress};
 use crate::core::modrinth::{self, ModrinthError, ModSearchRequest};
@@ -60,6 +61,31 @@ fn usage(key: &'static str, args: &[(&str, &str)]) -> CliError {
 }
 
 impl CliError {
+    /// Stable identifier written to file logs across versions and locales.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Auth(_) => "auth",
+            Self::Launch(_) => "launch",
+            Self::Modrinth(_) => "modrinth",
+            Self::Config(_) => "config",
+            Self::Core(_) => "core",
+            Self::Game(_) => "game_exit",
+            Self::Task(_) => "install_task",
+            Self::UnknownLoader(_) => "unknown_loader",
+            Self::Usage { .. } => "usage",
+            Self::Gui(_) => "gui",
+        }
+    }
+
+    /// English diagnostic for file logs, formatted from the structured
+    /// error and never passed through the i18n system.
+    pub fn log_detail(&self) -> String {
+        match self {
+            Self::Usage { detail, .. } => detail.clone(),
+            other => other.to_string(),
+        }
+    }
+
     /// Translated message for the terminal.
     pub fn user_message(&self) -> String {
         match self {
@@ -348,12 +374,20 @@ impl From<ContentType> for modrinth::ProjectType {
 }
 
 pub async fn run() -> Result<(), CliError> {
+    logging::init();
     let language = LauncherConfig::load()
         .ok()
         .and_then(|config| i18n::Language::from_code(&config.language))
         .unwrap_or_else(i18n::Language::detect);
     i18n::set_language(language);
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    logging::info(&format!(
+        "launcher {} started, command {}, terminal language {}",
+        env!("CARGO_PKG_VERSION"),
+        command_name(&command),
+        language.code()
+    ));
+    let result = match command {
         Some(Command::Account(args)) => run_account(args.action).await,
         Some(Command::Install(args)) => run_install(args).await,
         Some(Command::Launch(args)) => run_launch(args).await,
@@ -364,6 +398,26 @@ pub async fn run() -> Result<(), CliError> {
         Some(Command::Modpack(args)) => run_modpack(args).await,
         Some(Command::Config(args)) => run_config(args.action),
         Some(Command::Gui) | None => gui::run().map_err(CliError::Gui),
+    };
+    match &result {
+        Ok(()) => logging::info("command finished successfully"),
+        Err(error) => logging::error(error.code(), &error.log_detail()),
+    }
+    result
+}
+
+fn command_name(command: &Option<Command>) -> &'static str {
+    match command {
+        Some(Command::Account(_)) => "account",
+        Some(Command::Install(_)) => "install",
+        Some(Command::Launch(_)) => "launch",
+        Some(Command::List) => "list",
+        Some(Command::Java) => "java",
+        Some(Command::Search(_)) => "search",
+        Some(Command::Download(_)) => "download",
+        Some(Command::Modpack(_)) => "modpack",
+        Some(Command::Config(_)) => "config",
+        Some(Command::Gui) | None => "gui",
     }
 }
 
@@ -506,6 +560,10 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
     })
     .await
     .map_err(|error| CliError::Task(error.to_string()))??;
+    logging::info(&format!(
+        "installed version {version_id} into {}",
+        minecraft_dir.display()
+    ));
     let directory = minecraft_dir.display().to_string();
     println!(
         "{}",
@@ -582,6 +640,7 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
             ],
         )
     );
+    logging::info(&format!("launched version {}, pid {}", args.version, child.id()));
     // 子进程继承终端输出，不等到它退出就交还 shell 会把游戏日志和提示符搅在一起
     let status = child.wait().map_err(AuthError::from)?;
     if !status.success() {
@@ -739,6 +798,11 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
             )
         );
     }
+    logging::info(&format!(
+        "downloaded {} file(s) into {}",
+        outcome.installed.len(),
+        target.display()
+    ));
     let directory = target.display().to_string();
     println!("{}", tf("common.saved_to", &[("path", directory.as_str())]));
     if !outcome.skipped.is_empty() {
@@ -808,6 +872,7 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
             &[("path", path.as_str())],
         ));
     }
+    logging::info(&format!("installing modpack {}", args.file.display()));
     let mut config = LauncherConfig::load()?;
     let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
     let java = args
@@ -834,6 +899,11 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
         .map_err(|error| CliError::Task(error.to_string()));
     println!();
     let report = report?;
+    logging::info(&format!(
+        "installed modpack as version {} in {}",
+        report.version_id,
+        report.game_dir.display()
+    ));
     // 整合包放在隔离目录里，安装完成后把该版本标记为隔离实例；
     // 显式指定的安装目录先登记，否则隔离标记没有归属
     config.register_dir(&minecraft_dir.display().to_string());

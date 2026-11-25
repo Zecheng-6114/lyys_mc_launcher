@@ -6,6 +6,7 @@ use eframe::egui;
 use crate::core::auth::{Auth, SessionState};
 use crate::core::i18n::{t, tf};
 use crate::core::launch::{self, LaunchAccount, LaunchRequest};
+use crate::core::logging;
 use crate::gui::app::{App, Message, Task};
 
 impl App {
@@ -112,11 +113,15 @@ impl App {
             )
             .await;
             let line = match result {
-                Ok(pid) => tf(
-                    "cli.launch.launched",
-                    &[("name", version.as_str()), ("pid", pid.to_string().as_str())],
-                ),
+                Ok(pid) => {
+                    logging::info(&format!("launched version {version}, pid {pid}"));
+                    tf(
+                        "cli.launch.launched",
+                        &[("name", version.as_str()), ("pid", pid.to_string().as_str())],
+                    )
+                }
                 Err(error) => {
+                    logging::error("launch", &error.to_string());
                     error.message()
                 }
             };

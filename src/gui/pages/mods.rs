@@ -8,6 +8,7 @@ use mc_launcher_core::loader::LoaderKind;
 
 use crate::core::config;
 use crate::core::i18n::{t, tf};
+use crate::core::logging;
 use crate::core::modpack::{self, InstallOptions, PackProgress};
 use crate::core::modrinth::{self, ModSearchRequest, ProjectType};
 use crate::gui::app::{
@@ -557,6 +558,7 @@ impl App {
         match std::fs::remove_file(dir.join(&record.filename)) {
             Ok(()) => removed += 1,
             Err(error) => {
+                logging::error("content", &error.to_string());
                 self.mod_error = Some(tf(
                     "error.content_remove",
                     &[("name", record.filename.as_str()), ("error", error.to_string().as_str())],
@@ -707,7 +709,10 @@ impl App {
                 offset,
             })
             .await
-            .map_err(|error| error.message());
+            .map_err(|error| {
+                logging::error("modrinth", &error.to_string());
+                error.message()
+            });
             let _ = tx.send(Message::ModSearch { page, result });
             ctx.request_repaint();
         });
@@ -861,7 +866,10 @@ impl App {
                     .await
                 }
             }
-            .map_err(|error| error.message());
+            .map_err(|error| {
+                logging::error("content", &error.to_string());
+                error.message()
+            });
             let _ = tx.send(Message::ModInstalled {
                 dir: target,
                 game_version,
