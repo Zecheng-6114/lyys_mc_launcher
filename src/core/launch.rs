@@ -7,6 +7,7 @@ use mc_launcher_core::launcher::Launcher;
 use thiserror::Error;
 
 use super::auth::{GameToken, Profile};
+use super::i18n::tf;
 use super::java;
 
 const LAUNCHER_NAME: &str = "LYYSML";
@@ -31,6 +32,30 @@ pub enum LaunchError {
          install it or set its path in the settings"
     )]
     JavaMissing { required: u32 },
+}
+
+impl LaunchError {
+    /// Localized text for the interface; `Display` stays the English diagnostic.
+    pub fn message(&self) -> String {
+        match self {
+            Self::JavaMismatch { required, actual } => {
+                let required = required.to_string();
+                let actual = actual.to_string();
+                tf(
+                    "cli.error.java_mismatch",
+                    &[("required", required.as_str()), ("actual", actual.as_str())],
+                )
+            }
+            Self::JavaMissing { required } => {
+                let required = required.to_string();
+                tf("cli.error.java_missing", &[("required", required.as_str())])
+            }
+            other => {
+                let detail = other.to_string();
+                tf("cli.error.launch", &[("error", detail.as_str())])
+            }
+        }
+    }
 }
 
 pub enum LaunchAccount<'a> {

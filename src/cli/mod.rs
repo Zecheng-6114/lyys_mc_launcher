@@ -34,10 +34,64 @@ pub enum CliError {
     Task(String),
     #[error("unknown loader {0}, expected fabric, quilt, forge or neoforge")]
     UnknownLoader(String),
-    #[error("{0}")]
-    Usage(String),
+    /// `detail` is the English text written to file logs; `key` and `args`
+    /// render the translated terminal message separately.
+    #[error("{detail}")]
+    Usage {
+        key: &'static str,
+        args: Vec<(String, String)>,
+        detail: String,
+    },
     #[error("gui failed: {0}")]
     Gui(String),
+}
+
+/// Build a usage error. `key`/`args` select the translated terminal text;
+/// the English rendering of the same key is kept for file logs.
+fn usage(key: &'static str, args: &[(&str, &str)]) -> CliError {
+    CliError::Usage {
+        key,
+        args: args
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        detail: i18n::tf_en(key, args),
+    }
+}
+
+impl CliError {
+    /// Translated message for the terminal.
+    pub fn user_message(&self) -> String {
+        match self {
+            Self::Auth(error) => error.message(),
+            Self::Launch(error) => error.message(),
+            Self::Modrinth(error) => error.message(),
+            Self::Config(error) => {
+                let detail = error.to_string();
+                tf("cli.error.config", &[("error", detail.as_str())])
+            }
+            Self::Core(error) => {
+                let detail = error.to_string();
+                tf("cli.error.core", &[("error", detail.as_str())])
+            }
+            Self::Game(status) => {
+                let status = status.to_string();
+                tf("cli.error.game_exit", &[("status", status.as_str())])
+            }
+            Self::Task(detail) => tf("cli.error.task_failed", &[("error", detail.as_str())]),
+            Self::UnknownLoader(loader) => {
+                tf("cli.error.unknown_loader", &[("loader", loader.as_str())])
+            }
+            Self::Gui(detail) => tf("cli.error.gui_failed", &[("error", detail.as_str())]),
+            Self::Usage { key, args, .. } => {
+                let args = args
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                tf(key, &args)
+            }
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -400,7 +454,7 @@ fn resolve_account(auth: &Auth, query: &str) -> Result<AccountSession, CliError>
         });
     match matched {
         Some(account) => Ok(account.clone()),
-        None => Err(CliError::Usage(format!("account not found: {query}"))),
+        None => Err(usage("cli.error.account_not_found", &[("account", query)])),
     }
 }
 
@@ -483,10 +537,10 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
     let installed = install::installed_versions(&minecraft_dir)
         .map_err(|error| mc_launcher_core::LauncherError::Io { source: error })?;
     if !installed.iter().any(|id| id == &args.version) {
-        return Err(CliError::Usage(format!(
-            "no installed instance named {}; install it first",
-            args.version
-        )));
+        return Err(usage(
+            "cli.error.version_not_installed",
+            &[("version", args.version.as_str())],
+        ));
     }
     let java = match args.java {
         Some(java) => Some(java),
@@ -544,10 +598,10 @@ fn run_list() -> Result<(), CliError> {
     let versions = install::installed_versions(&minecraft_dir)
         .map_err(|error| mc_launcher_core::LauncherError::Io { source: error })?;
     if versions.is_empty() {
-        println!("no installed versions in {dir}");
+        println!("{}", tf("cli.list.none", &[("dir", dir.as_str())]));
         return Ok(());
     }
-    println!("installed versions in {dir}:");
+    println!("{}", tf("cli.list.header", &[("dir", dir.as_str())]));
     for version in &versions {
         println!("  {version}");
     }
@@ -624,21 +678,15 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
 async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
     let kind = modrinth::ProjectType::from(args.kind);
     if kind == modrinth::ProjectType::Modpack {
-        return Err(CliError::Usage(
-            "modpacks must be installed with `modpack install`".to_owned(),
-        ));
+        return Err(usage("cli.error.modpack_command", &[]));
     }
     let game_version = args.minecraft.trim();
     if game_version.is_empty() {
-        return Err(CliError::Usage(
-            t("cli.error.minecraft_empty").to_owned(),
-        ));
+        return Err(usage("cli.error.minecraft_empty", &[]));
     }
     let loader = args.loader.as_deref().map(str::trim).unwrap_or("");
     if kind == modrinth::ProjectType::Mod && loader.is_empty() {
-        return Err(CliError::Usage(
-            t("cli.error.mods_loader").to_owned(),
-        ));
+        return Err(usage("cli.error.mods_loader", &[]));
     }
 
     let target = match args.target {
@@ -661,16 +709,12 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
                 modrinth::ProjectType::DataPack => {
                     let world = args.world.as_deref().map(str::trim).unwrap_or("");
                     if world.is_empty() {
-                        return Err(CliError::Usage(
-                            t("cli.error.datapack_world").to_owned(),
-                        ));
+                        return Err(usage("cli.error.datapack_world", &[]));
                     }
                     game_dir.join("saves").join(world).join("datapacks")
                 }
                 modrinth::ProjectType::Modpack => {
-                    return Err(CliError::Usage(
-                        "modpacks must be installed with `modpack install`".to_owned(),
-                    ));
+                    return Err(usage("cli.error.modpack_command", &[]));
                 }
             }
         }
@@ -709,10 +753,11 @@ async fn run_modpack(args: ModpackArgs) -> Result<(), CliError> {
         ModpackAction::Install(args) => run_modpack_install(args).await,
         ModpackAction::Info { file } => {
             if !file.exists() {
-                return Err(CliError::Usage(format!(
-                    "modpack file not found: {}",
-                    file.display()
-                )));
+                let path = file.display().to_string();
+                return Err(usage(
+                    "cli.error.modpack_file_not_found",
+                    &[("path", path.as_str())],
+                ));
             }
             let pack = modpack::inspect(&file)
                 .await
@@ -757,10 +802,11 @@ async fn run_modpack(args: ModpackArgs) -> Result<(), CliError> {
 
 async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
     if !args.file.exists() {
-        return Err(CliError::Usage(format!(
-            "modpack file not found: {}",
-            args.file.display()
-        )));
+        let path = args.file.display().to_string();
+        return Err(usage(
+            "cli.error.modpack_file_not_found",
+            &[("path", path.as_str())],
+        ));
     }
     let mut config = LauncherConfig::load()?;
     let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
@@ -848,10 +894,8 @@ fn group_thousands(value: u64) -> String {
 
 fn validate_java_path(path: &Path) -> Result<(), CliError> {
     if !path.is_file() {
-        return Err(CliError::Usage(format!(
-            "java executable not found: {}",
-            path.display()
-        )));
+        let text = path.display().to_string();
+        return Err(usage("cli.error.java_not_found", &[("path", text.as_str())]));
     }
     Ok(())
 }
@@ -911,19 +955,18 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 .filter(|chosen| **chosen)
                 .count();
             if selected > 1 {
-                return Err(CliError::Usage(t("cli.dir.one_action").to_owned()));
+                return Err(usage("cli.dir.one_action", &[]));
             }
             if name.is_some() && add.is_none() && use_dir.is_none() {
-                return Err(CliError::Usage(
-                    t("cli.dir.name_requires_target").to_owned(),
-                ));
+                return Err(usage("cli.dir.name_requires_target", &[]));
             }
             if let Some(path) = add {
                 if !path.is_dir() {
-                    return Err(CliError::Usage(format!(
-                        "directory does not exist: {}",
-                        path.display()
-                    )));
+                    let text = path.display().to_string();
+                    return Err(usage(
+                        "cli.error.directory_not_found",
+                        &[("path", text.as_str())],
+                    ));
                 }
                 let path = path.display().to_string();
                 config.select_dir(&path);
@@ -935,7 +978,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             } else if let Some(path) = use_dir {
                 let path = path.display().to_string();
                 let index = config.dir_index(&path).ok_or_else(|| {
-                    CliError::Usage(tf("cli.dir.not_found", &[("path", path.as_str())]))
+                    usage("cli.dir.not_found", &[("path", path.as_str())])
                 })?;
                 config.active_minecraft_dir = config.minecraft_dirs[index].path.clone();
                 if let Some(name) = name {
@@ -944,10 +987,10 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             } else if let Some(path) = remove {
                 let path = path.display().to_string();
                 let index = config.dir_index(&path).ok_or_else(|| {
-                    CliError::Usage(tf("cli.dir.not_found", &[("path", path.as_str())]))
+                    usage("cli.dir.not_found", &[("path", path.as_str())])
                 })?;
                 if config.minecraft_dirs.len() <= 1 {
-                    return Err(CliError::Usage(t("cli.dir.keep_one").to_owned()));
+                    return Err(usage("cli.dir.keep_one", &[]));
                 }
                 config.minecraft_dirs.remove(index);
             } else {
@@ -982,10 +1025,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 );
             } else {
                 if !isolate && !no_isolate && java.is_none() {
-                    return Err(CliError::Usage(
-                        t("cli.error.instance_flags")
-                            .to_owned(),
-                    ));
+                    return Err(usage("cli.error.instance_flags", &[]));
                 }
                 let entry = dir.instances.entry(version.clone()).or_default();
                 entry.use_global = false;

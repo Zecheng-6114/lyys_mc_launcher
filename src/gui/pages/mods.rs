@@ -707,7 +707,7 @@ impl App {
                 offset,
             })
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.message());
             let _ = tx.send(Message::ModSearch { page, result });
             ctx.request_repaint();
         });
@@ -861,7 +861,7 @@ impl App {
                     .await
                 }
             }
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.message());
             let _ = tx.send(Message::ModInstalled {
                 dir: target,
                 game_version,

@@ -21,10 +21,10 @@ impl App {
                         match self.auth.set_active(&uuid) {
                             Ok(()) => self.active = Some(uuid.clone()),
                             Err(error) => {
-                                let error = error.to_string();
+                                let detail = error.message();
                                 self.log.push(tf(
                                     "error.account_active",
-                                    &[("error", error.as_str())],
+                                    &[("error", detail.as_str())],
                                 ));
                             }
                         }
@@ -39,9 +39,11 @@ impl App {
                         match self.auth.remove(&uuid) {
                             Ok(()) => self.reload_accounts(),
                             Err(error) => {
-                                let error = error.to_string();
-                                self.log
-                                    .push(tf("error.account_remove", &[("error", error.as_str())]))
+                                let detail = error.message();
+                                self.log.push(tf(
+                                    "error.account_remove",
+                                    &[("error", detail.as_str())],
+                                ))
                             }
                         }
                     }
@@ -62,9 +64,9 @@ impl App {
                             self.reload_accounts();
                         }
                         Err(error) => {
-                            let error = error.to_string();
+                            let detail = error.message();
                             self.log
-                                .push(tf("error.account_add", &[("error", error.as_str())]));
+                                .push(tf("error.account_add", &[("error", detail.as_str())]));
                         }
                     }
                 }

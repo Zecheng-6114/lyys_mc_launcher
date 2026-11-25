@@ -143,7 +143,19 @@ pub fn t(key: &'static str) -> &'static str {
 
 /// Translate a key and substitute `{name}` placeholders from `args`.
 pub fn tf(key: &'static str, args: &[(&str, &str)]) -> String {
-    let template = t(key);
+    render(t(key), args)
+}
+
+/// Render a key from the English catalog regardless of the selected language.
+pub fn tf_en(key: &'static str, args: &[(&str, &str)]) -> String {
+    let template = catalog(Language::EnUs)
+        .get(key)
+        .map(String::as_str)
+        .unwrap_or(key);
+    render(template, args)
+}
+
+fn render(template: &str, args: &[(&str, &str)]) -> String {
     if args.is_empty() || !template.contains('{') {
         return template.to_owned();
     }

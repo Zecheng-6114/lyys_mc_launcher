@@ -659,8 +659,8 @@ impl App {
                     &[("name", session.profile.name.as_str())],
                 ),
                 Err(error) => {
-                    let error = error.to_string();
-                    tf("error.login_failed", &[("error", error.as_str())])
+                    let detail = error.message();
+                    tf("error.login_failed", &[("error", detail.as_str())])
                 }
             };
             let _ = tx.send(Message::Log(line));

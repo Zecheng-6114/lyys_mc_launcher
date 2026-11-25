@@ -11,7 +11,7 @@ async fn main() -> ExitCode {
     match cli::run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            let message = error.to_string();
+            let message = error.user_message();
             eprintln!("{}", tf("error.prefix", &[("message", message.as_str())]));
             ExitCode::FAILURE
         }

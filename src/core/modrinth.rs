@@ -7,6 +7,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::core::config;
+use crate::core::i18n::tf;
 
 const SEARCH_URL: &str = "https://api.modrinth.com/v2/search";
 const VERSION_URL: &str = "https://api.modrinth.com/v2/version";
@@ -28,6 +29,27 @@ pub enum ModrinthError {
     NoFile(String),
     #[error("failed to save the mod: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl ModrinthError {
+    /// Localized text for the interface; `Display` stays the English diagnostic.
+    pub fn message(&self) -> String {
+        match self {
+            Self::ProjectNotFound(project) => {
+                tf("cli.error.project_not_found", &[("project", project.as_str())])
+            }
+            Self::NoCompatibleVersion(project) => {
+                tf("cli.error.no_compatible_version", &[("project", project.as_str())])
+            }
+            Self::NoFile(project) => {
+                tf("cli.error.no_file", &[("project", project.as_str())])
+            }
+            other => {
+                let detail = other.to_string();
+                tf("cli.error.modrinth", &[("error", detail.as_str())])
+            }
+        }
+    }
 }
 
 /// 单个内容文件的下载进度，供 GUI 展示。

@@ -117,8 +117,7 @@ impl App {
                     &[("name", version.as_str()), ("pid", pid.to_string().as_str())],
                 ),
                 Err(error) => {
-                    let error = error.to_string();
-                    tf("error.launch_failed", &[("error", error.as_str())])
+                    error.message()
                 }
             };
             let _ = tx.send(Message::Log(line));
