@@ -49,6 +49,8 @@ pub(crate) enum Message {
         kind: ProjectType,
         result: Result<InstallOutcome, String>,
     },
+    /// 内容下载的行内进度文本。
+    ModProgress(String),
     ModUpdates {
         dir: PathBuf,
         updates: HashMap<String, (String, String)>,
@@ -258,6 +260,7 @@ pub(crate) struct App {
     pub(crate) mod_page: u32,
     pub(crate) mod_searching: bool,
     pub(crate) mod_installing: Option<String>,
+    pub(crate) mod_progress: Option<String>,
     pub(crate) mod_notice: Option<String>,
     pub(crate) mod_error: Option<String>,
     pub(crate) installed_mods: HashMap<String, ModRecord>,
@@ -342,6 +345,7 @@ impl App {
             mod_page: 1,
             mod_searching: false,
             mod_installing: None,
+            mod_progress: None,
             mod_notice: None,
             mod_error: None,
             installed_mods: HashMap::new(),
@@ -732,6 +736,7 @@ impl eframe::App for App {
                 },
                 Message::Progress(progress) => self.install_progress = Some(progress),
                 Message::ModpackProgress(line) => self.modpack_progress = Some(line),
+                Message::ModProgress(line) => self.mod_progress = Some(line),
                 Message::ModpackDone { dir, result } => {
                     self.modpack_installing = false;
                     self.modpack_progress = None;
@@ -842,6 +847,7 @@ impl eframe::App for App {
                     result,
                 } => {
                     self.mod_installing = None;
+                    self.mod_progress = None;
                     match result {
                         Ok(outcome) => {
                             // 安装期间切换了类型或目录时，不再把记录写进当前视图

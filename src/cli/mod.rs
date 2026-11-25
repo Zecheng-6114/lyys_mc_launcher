@@ -55,6 +55,8 @@ enum Command {
     Install(InstallArgs),
     /// Launch an installed version and wait for the game to exit.
     Launch(LaunchArgs),
+    /// List the versions installed in the active Minecraft directory.
+    List,
     /// List the Java runtimes found on this machine.
     Java,
     /// Search projects on Modrinth.
@@ -301,6 +303,7 @@ pub async fn run() -> Result<(), CliError> {
         Some(Command::Account(args)) => run_account(args.action).await,
         Some(Command::Install(args)) => run_install(args).await,
         Some(Command::Launch(args)) => run_launch(args).await,
+        Some(Command::List) => run_list(),
         Some(Command::Java) => run_java_list(),
         Some(Command::Search(args)) => run_search(args).await,
         Some(Command::Download(args)) => run_download(args).await,
@@ -477,6 +480,14 @@ fn parse_loader(name: &str, version: Option<String>) -> Result<LoaderSpec, CliEr
 async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
     let config = LauncherConfig::load()?;
     let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
+    let installed = install::installed_versions(&minecraft_dir)
+        .map_err(|error| mc_launcher_core::LauncherError::Io { source: error })?;
+    if !installed.iter().any(|id| id == &args.version) {
+        return Err(CliError::Usage(format!(
+            "no installed instance named {}; install it first",
+            args.version
+        )));
+    }
     let java = match args.java {
         Some(java) => Some(java),
         None => configured_java(config.effective_java(&args.version)),
@@ -521,6 +532,24 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
     let status = child.wait().map_err(AuthError::from)?;
     if !status.success() {
         return Err(CliError::Game(status));
+    }
+    Ok(())
+}
+
+/// Print the versions installed in the active Minecraft directory.
+fn run_list() -> Result<(), CliError> {
+    let config = LauncherConfig::load()?;
+    let minecraft_dir = resolve_minecraft_dir(None, &config)?;
+    let dir = minecraft_dir.display().to_string();
+    let versions = install::installed_versions(&minecraft_dir)
+        .map_err(|error| mc_launcher_core::LauncherError::Io { source: error })?;
+    if versions.is_empty() {
+        println!("no installed versions in {dir}");
+        return Ok(());
+    }
+    println!("installed versions in {dir}:");
+    for version in &versions {
+        println!("  {version}");
     }
     Ok(())
 }
@@ -649,9 +678,10 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
 
     let outcome = match kind {
         modrinth::ProjectType::Mod => {
-            modrinth::install_with_dependencies(&args.project, game_version, loader, &target).await?
+            modrinth::install_with_dependencies(&args.project, game_version, loader, &target, &mut |_| {})
+                .await?
         }
-        _ => modrinth::install_content(&args.project, game_version, &target).await?,
+        _ => modrinth::install_content(&args.project, game_version, &target, &mut |_| {}).await?,
     };
     for installed in &outcome.installed {
         println!(
@@ -889,6 +919,12 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 ));
             }
             if let Some(path) = add {
+                if !path.is_dir() {
+                    return Err(CliError::Usage(format!(
+                        "directory does not exist: {}",
+                        path.display()
+                    )));
+                }
                 let path = path.display().to_string();
                 config.select_dir(&path);
                 if let Some(name) = name {

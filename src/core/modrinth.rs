@@ -20,6 +20,8 @@ const MAX_INSTALLED_MODS: usize = 64;
 pub enum ModrinthError {
     #[error("Modrinth request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("project not found on Modrinth: {0}")]
+    ProjectNotFound(String),
     #[error("no compatible version found for {0}")]
     NoCompatibleVersion(String),
     #[error("{0} has no downloadable file")]
@@ -27,6 +29,45 @@ pub enum ModrinthError {
     #[error("failed to save the mod: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// 单个内容文件的下载进度，供 GUI 展示。
+#[derive(Debug, Clone)]
+pub struct ContentProgress {
+    pub filename: String,
+    pub downloaded: u64,
+    /// 文件总字节数，接口未提供时为 0。
+    pub total: u64,
+}
+
+impl ContentProgress {
+    /// 渲染成一行人类可读的进度文本。
+    pub fn describe(&self) -> String {
+        let done = human_bytes(self.downloaded);
+        if self.total > 0 {
+            format!("{}  {done} / {}", self.filename, human_bytes(self.total))
+        } else {
+            format!("{}  {done}", self.filename)
+        }
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// 进度回调的最小间隔，避免高频重绘拖慢界面。
+const CONTENT_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectType {
@@ -118,6 +159,8 @@ struct ModFile {
     url: String,
     filename: String,
     #[serde(default)]
+    size: u64,
+    #[serde(default)]
     primary: bool,
 }
 
@@ -188,12 +231,44 @@ pub async fn search(request: ModSearchRequest<'_>) -> Result<ModSearchResult, Mo
     })
 }
 
+/// 分块下载单个文件，同时向 `progress` 汇报字节进度。
+async fn download_bytes(
+    client: &reqwest::Client,
+    file: &ModFile,
+    progress: &mut (dyn FnMut(ContentProgress) + Send),
+) -> Result<Vec<u8>, ModrinthError> {
+    let mut response = client
+        .get(file.url.as_str())
+        .send()
+        .await?
+        .error_for_status()?;
+    let total = file.size;
+    let mut data: Vec<u8> = Vec::with_capacity((total as usize).min(16 * 1024 * 1024));
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    while let Some(chunk) = response.chunk().await? {
+        data.extend_from_slice(&chunk);
+        downloaded += chunk.len() as u64;
+        let finished = total > 0 && downloaded >= total;
+        if finished || last_emit.elapsed() >= CONTENT_PROGRESS_INTERVAL {
+            last_emit = std::time::Instant::now();
+            progress(ContentProgress {
+                filename: file.filename.clone(),
+                downloaded,
+                total,
+            });
+        }
+    }
+    Ok(data)
+}
+
 /// Install `project` together with its required dependencies into `mods_dir`.
 pub async fn install_with_dependencies(
     project: &str,
     game_version: &str,
     loader: &str,
     mods_dir: &Path,
+    progress: &mut (dyn FnMut(ContentProgress) + Send),
 ) -> Result<InstallOutcome, ModrinthError> {
     let client = client()?;
     std::fs::create_dir_all(mods_dir)?;
@@ -245,13 +320,7 @@ pub async fn install_with_dependencies(
             None => files.remove(0),
         };
 
-        let bytes = client
-            .get(file.url.as_str())
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let bytes = download_bytes(&client, &file, &mut *progress).await?;
         let filename = sanitize_filename(&file.filename);
         std::fs::write(mods_dir.join(&filename), bytes)?;
 
@@ -289,6 +358,7 @@ pub async fn install_content(
     project: &str,
     game_version: &str,
     target_dir: &Path,
+    progress: &mut (dyn FnMut(ContentProgress) + Send),
 ) -> Result<InstallOutcome, ModrinthError> {
     let client = client()?;
     std::fs::create_dir_all(target_dir)?;
@@ -302,13 +372,7 @@ pub async fn install_content(
         None if files.is_empty() => return Err(ModrinthError::NoFile(project.to_owned())),
         None => files.remove(0),
     };
-    let bytes = client
-        .get(file.url.as_str())
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let bytes = download_bytes(&client, &file, progress).await?;
     let filename = sanitize_filename(&file.filename);
     std::fs::write(target_dir.join(&filename), bytes)?;
     Ok(InstallOutcome {
@@ -332,6 +396,7 @@ pub async fn download_primary_file(
     game_version: &str,
     loader: Option<&str>,
     dest: &Path,
+    progress: &mut (dyn FnMut(ContentProgress) + Send),
 ) -> Result<(), ModrinthError> {
     let client = client()?;
     let versions = fetch_versions(&client, project, game_version, loader).await?;
@@ -344,13 +409,7 @@ pub async fn download_primary_file(
         None if files.is_empty() => return Err(ModrinthError::NoFile(project.to_owned())),
         None => files.remove(0),
     };
-    let bytes = client
-        .get(file.url.as_str())
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let bytes = download_bytes(&client, &file, progress).await?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -441,14 +500,12 @@ async fn fetch_versions(
         ));
     }
     let url = format!("https://api.modrinth.com/v2/project/{project}/version");
-    Ok(client
-        .get(url)
-        .query(&params)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Vec<ModVersion>>()
-        .await?)
+    let response = client.get(url).query(&params).send().await?;
+    // 404 意味着项目名写错，直接给出项目标识而不是原始 URL
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(ModrinthError::ProjectNotFound(project.to_owned()));
+    }
+    Ok(response.error_for_status()?.json::<Vec<ModVersion>>().await?)
 }
 
 async fn fetch_version(

@@ -182,6 +182,9 @@ impl App {
         if let Some(notice) = &self.mod_notice {
             ui.label(notice);
         }
+        if let Some(progress) = &self.mod_progress {
+            ui.label(egui::RichText::new(progress).weak());
+        }
         let game_dir = self.game_dir();
         let target_dir = self.content_dir(self.mod_kind);
         if self.mod_kind == ProjectType::Modpack {
@@ -773,6 +776,7 @@ impl App {
             return;
         }
         self.mod_installing = Some(project.clone());
+        self.mod_progress = Some(t("content.downloading").to_owned());
         self.mod_error = None;
         self.mod_notice = None;
         if kind == ProjectType::Modpack {
@@ -795,6 +799,8 @@ impl App {
             let progress_tx = self.tx.clone();
             let ctx = ctx.clone();
             let progress_ctx = ctx.clone();
+            let archive_tx = self.tx.clone();
+            let archive_ctx = ctx.clone();
             let done_dir = minecraft_dir.clone();
             self.handle.spawn(async move {
                 // 在线安装同样用真实进度回调，而不是空回调
@@ -808,6 +814,10 @@ impl App {
                     &loader,
                     &minecraft_dir,
                     &java,
+                    &mut move |progress: modrinth::ContentProgress| {
+                        let _ = archive_tx.send(Message::ModpackProgress(progress.describe()));
+                        archive_ctx.request_repaint();
+                    },
                     reporter,
                 )
                 .await;
@@ -831,10 +841,25 @@ impl App {
                         game_version.trim(),
                         &loader,
                         &target,
+                        &mut |progress: modrinth::ContentProgress| {
+                            let _ = tx.send(Message::ModProgress(progress.describe()));
+                            ctx.request_repaint();
+                        },
                     )
                     .await
                 }
-                _ => modrinth::install_content(&project, game_version.trim(), &target).await,
+                _ => {
+                    modrinth::install_content(
+                        &project,
+                        game_version.trim(),
+                        &target,
+                        &mut |progress: modrinth::ContentProgress| {
+                            let _ = tx.send(Message::ModProgress(progress.describe()));
+                            ctx.request_repaint();
+                        },
+                    )
+                    .await
+                }
             }
             .map_err(|error| error.to_string());
             let _ = tx.send(Message::ModInstalled {
@@ -856,6 +881,7 @@ async fn install_modpack_from_modrinth(
     loader: &str,
     minecraft_dir: &Path,
     java: &Path,
+    archive_progress: &mut (dyn FnMut(modrinth::ContentProgress) + Send),
     reporter: Arc<dyn Fn(PackProgress) + Send + Sync>,
 ) -> Result<modpack::InstallReport, String> {
     let cache = config::cache_dir()
@@ -863,7 +889,7 @@ async fn install_modpack_from_modrinth(
         .unwrap_or_else(|_| std::env::temp_dir().join("lyys-modpacks"));
     let archive = cache.join(format!("{}.mrpack", safe_file_name(project)));
     let loader = (!loader.trim().is_empty()).then_some(loader);
-    modrinth::download_primary_file(project, game_version, loader, &archive)
+    modrinth::download_primary_file(project, game_version, loader, &archive, archive_progress)
         .await
         .map_err(|error| error.to_string())?;
     let options = InstallOptions {

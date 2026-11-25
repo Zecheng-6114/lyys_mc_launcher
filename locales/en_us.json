@@ -75,6 +75,7 @@
   "common.version_isolation": "version isolation: {value}",
 
   "content.dependencies_suffix": " (+{count} dependencies)",
+  "content.downloading": "downloading...",
   "content.from_instance": "From instance:",
   "content.generic": "content",
   "content.isolated_suffix": " (isolated)",
