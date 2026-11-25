@@ -488,6 +488,12 @@ fn read_manifest_text(path: &Path, prefix: &str, name: &str) -> Result<String, M
 }
 
 fn open_archive(path: &Path) -> Result<zip::ZipArchive<fs::File>, ModpackError> {
+    if !path.is_file() {
+        return Err(ModpackError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("modpack file not found: {}", path.display()),
+        )));
+    }
     let file = fs::File::open(path).map_err(|error| {
         ModpackError::Io(std::io::Error::new(
             error.kind(),

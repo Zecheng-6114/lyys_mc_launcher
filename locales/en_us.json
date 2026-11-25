@@ -196,6 +196,7 @@
   "settings.dir_path_hint": "directory path",
   "settings.global": "Global configuration",
   "settings.inherit_global": "inherit global",
+  "settings.java_invalid": "Java executable not found; the game will fail to start with this path",
   "settings.instance_use_global": "{instance}: use global configuration",
   "settings.instances_for": "Instance configuration for {dir}",
   "settings.instances_hint": "Each instance uses the global configuration unless overridden below",

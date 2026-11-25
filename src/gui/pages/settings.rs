@@ -296,6 +296,10 @@ impl App {
                             .hint_text(t("settings.inherit_global")),
                     );
                 });
+                let java_path = entry.java_path.trim();
+                if !java_path.is_empty() && !std::path::Path::new(java_path).is_file() {
+                    ui.colored_label(ui.visuals().error_fg_color, t("settings.java_invalid"));
+                }
             });
             if toggled {
                 let entry = dir

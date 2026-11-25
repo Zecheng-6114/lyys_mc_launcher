@@ -196,6 +196,7 @@
   "settings.dir_path_hint": "ディレクトリパス",
   "settings.global": "グローバル設定",
   "settings.inherit_global": "グローバルを継承",
+  "settings.java_invalid": "この Java 実行ファイルが見つかりません。このパスでは起動に失敗します",
   "settings.instance_use_global": "{instance}: グローバル設定を使用",
   "settings.instances_for": "{dir} のインスタンス設定",
   "settings.instances_hint": "以下で個別に上書きしない限り、各インスタンスはグローバル設定を使用します",

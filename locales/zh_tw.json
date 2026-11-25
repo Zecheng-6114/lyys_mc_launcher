@@ -196,6 +196,7 @@
   "settings.dir_path_hint": "目錄路徑",
   "settings.global": "全域設定",
   "settings.inherit_global": "繼承全域",
+  "settings.java_invalid": "找不到該 Java 可執行檔，使用此路徑啟動會失敗",
   "settings.instance_use_global": "{instance}：使用全域設定",
   "settings.instances_for": "{dir} 的實例設定",
   "settings.instances_hint": "除非在下方個別覆寫，每個實例都使用全域設定",

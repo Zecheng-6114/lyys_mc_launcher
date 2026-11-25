@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
@@ -49,15 +49,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage Microsoft and offline accounts.
     Account(AccountArgs),
+    /// Install a Minecraft version, optionally with a mod loader.
     Install(InstallArgs),
+    /// Launch an installed version and wait for the game to exit.
     Launch(LaunchArgs),
     /// List the Java runtimes found on this machine.
     Java,
+    /// Search projects on Modrinth.
     Search(SearchArgs),
+    /// Download a Modrinth project file into an instance.
     Download(DownloadArgs),
+    /// Inspect or install a local modpack archive.
     Modpack(ModpackArgs),
+    /// Show or change launcher configuration.
     Config(ConfigArgs),
+    /// Start the graphical interface (default when no command is given).
     Gui,
 }
 
@@ -69,17 +77,31 @@ struct AccountArgs {
 
 #[derive(Subcommand)]
 enum AccountAction {
+    /// Sign in with a Microsoft account (device code flow).
     Login,
+    /// Add an offline account by name.
     Offline { name: String },
+    /// List all saved accounts, marking the active one.
     List,
-    Use { uuid: String },
-    Remove { uuid: String },
+    /// Select the account used for launching.
+    Use {
+        /// Account name or UUID.
+        account: String,
+    },
+    /// Remove a saved account.
+    Remove {
+        /// Account name or UUID.
+        account: String,
+    },
+    /// Show the currently selected account.
     Current,
 }
 
 #[derive(Args)]
 struct InstallArgs {
+    /// Minecraft version to install, e.g. 1.20.1.
     version: String,
+    /// Minecraft directory to install into (defaults to the active one).
     #[arg(long)]
     minecraft_dir: Option<PathBuf>,
     /// Mod loader to install: fabric, quilt, forge or neoforge.
@@ -95,11 +117,15 @@ struct InstallArgs {
 
 #[derive(Args)]
 struct LaunchArgs {
+    /// Installed version or instance to launch, e.g. 1.20.1.
     version: String,
+    /// Minecraft directory containing the version (defaults to the active one).
     #[arg(long)]
     minecraft_dir: Option<PathBuf>,
+    /// Game directory to run the version from.
     #[arg(long)]
     game_dir: Option<PathBuf>,
+    /// Java executable to run the game with.
     #[arg(long)]
     java: Option<PathBuf>,
     /// Override the configured version isolation for this launch.
@@ -125,6 +151,7 @@ enum ConfigAction {
         /// Register the directory (if it is new) and make it the active one.
         #[arg(long)]
         minecraft_dir: Option<PathBuf>,
+        /// Java executable used when no version-specific override exists.
         #[arg(long)]
         java: Option<PathBuf>,
         /// Enable version isolation.
@@ -151,14 +178,18 @@ enum ConfigAction {
     },
     /// Use the global configuration or override it for one instance.
     Instance {
+        /// Version or instance id to configure.
         version: String,
         /// Fall back to the global configuration.
         #[arg(long, conflicts_with_all = ["isolate", "no_isolate", "java"])]
         global: bool,
+        /// Enable version isolation for this instance.
         #[arg(long, conflicts_with = "no_isolate")]
         isolate: bool,
+        /// Disable version isolation for this instance.
         #[arg(long)]
         no_isolate: bool,
+        /// Java executable for this instance.
         #[arg(long)]
         java: Option<PathBuf>,
     },
@@ -169,7 +200,7 @@ struct SearchArgs {
     /// Search query; leave empty to list popular projects.
     #[arg(long)]
     query: Option<String>,
-    /// Project type: mod, resourcepack, shader or datapack.
+    /// Project type: mod, modpack, resourcepack, shader or datapack.
     #[arg(long = "type", value_enum, default_value = "mod")]
     kind: ContentType,
     /// Only show projects for this Minecraft version.
@@ -184,7 +215,7 @@ struct SearchArgs {
 struct DownloadArgs {
     /// Modrinth project slug or id.
     project: String,
-    /// Project type: mod, resourcepack, shader or datapack.
+    /// Project type: mod, resourcepack, shader or datapack (modpacks use `modpack install`).
     #[arg(long = "type", value_enum, default_value = "mod")]
     kind: ContentType,
     /// Minecraft version used to pick a compatible file.
@@ -193,6 +224,7 @@ struct DownloadArgs {
     /// Mod loader; required when installing mods.
     #[arg(long)]
     loader: Option<String>,
+    /// Minecraft directory that owns the target instance (defaults to the active one).
     #[arg(long)]
     minecraft_dir: Option<PathBuf>,
     /// Instance whose isolation setting decides the game directory.
@@ -217,13 +249,17 @@ enum ModpackAction {
     /// Install a modpack from a .mrpack, CurseForge or server pack archive.
     Install(ModpackInstallArgs),
     /// Print what a modpack archive contains without installing it.
-    Info { file: PathBuf },
+    Info {
+        /// Path to the modpack archive.
+        file: PathBuf,
+    },
 }
 
 #[derive(Args)]
 struct ModpackInstallArgs {
     /// Path to the modpack archive.
     file: PathBuf,
+    /// Minecraft directory to install into (defaults to the active one).
     #[arg(long)]
     minecraft_dir: Option<PathBuf>,
     /// Java used by the Forge/NeoForge installer.
@@ -237,6 +273,7 @@ struct ModpackInstallArgs {
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ContentType {
     Mod,
+    Modpack,
     Resourcepack,
     Shader,
     Datapack,
@@ -246,6 +283,7 @@ impl From<ContentType> for modrinth::ProjectType {
     fn from(kind: ContentType) -> Self {
         match kind {
             ContentType::Mod => Self::Mod,
+            ContentType::Modpack => Self::Modpack,
             ContentType::Resourcepack => Self::ResourcePack,
             ContentType::Shader => Self::ShaderPack,
             ContentType::Datapack => Self::DataPack,
@@ -320,13 +358,21 @@ async fn run_account(action: AccountAction) -> Result<(), CliError> {
                 )
             );
         }
-        AccountAction::Use { uuid } => {
-            auth.set_active(&uuid)?;
-            println!("{}", tf("cli.account.active_set", &[("account", uuid.as_str())]));
+        AccountAction::Use { account } => {
+            let resolved = resolve_account(&auth, &account)?;
+            auth.set_active(&resolved.profile.id)?;
+            println!(
+                "{}",
+                tf("cli.account.active_set", &[("account", resolved.profile.name.as_str())])
+            );
         }
-        AccountAction::Remove { uuid } => {
-            auth.remove(&uuid)?;
-            println!("{}", tf("cli.account.removed", &[("account", uuid.as_str())]));
+        AccountAction::Remove { account } => {
+            let resolved = resolve_account(&auth, &account)?;
+            auth.remove(&resolved.profile.id)?;
+            println!(
+                "{}",
+                tf("cli.account.removed", &[("account", resolved.profile.name.as_str())])
+            );
         }
         AccountAction::Current => {
             let session = auth.refresh_current().await?;
@@ -334,6 +380,25 @@ async fn run_account(action: AccountAction) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+/// 按 UUID 或玩家名解析账号；名称先精确匹配再忽略大小写。
+fn resolve_account(auth: &Auth, query: &str) -> Result<AccountSession, CliError> {
+    let query = query.trim();
+    let accounts = auth.list()?;
+    let matched = accounts
+        .iter()
+        .find(|account| account.profile.id.eq_ignore_ascii_case(query))
+        .or_else(|| accounts.iter().find(|account| account.profile.name == query))
+        .or_else(|| {
+            accounts
+                .iter()
+                .find(|account| account.profile.name.eq_ignore_ascii_case(query))
+        });
+    match matched {
+        Some(account) => Ok(account.clone()),
+        None => Err(CliError::Usage(format!("account not found: {query}"))),
+    }
 }
 
 async fn run_install(args: InstallArgs) -> Result<(), CliError> {
@@ -503,7 +568,7 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
         return Ok(());
     }
     for hit in &result.hits {
-        let downloads = hit.downloads.to_string();
+        let downloads = group_thousands(hit.downloads);
         println!(
             "{}",
             tf(
@@ -518,7 +583,7 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
         );
     }
     println!();
-    let total_hits = result.total_hits.to_string();
+    let total_hits = group_thousands(result.total_hits);
     let shown = result.hits.len().to_string();
     println!(
         "{}",
@@ -529,6 +594,11 @@ async fn run_search(args: SearchArgs) -> Result<(), CliError> {
 
 async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
     let kind = modrinth::ProjectType::from(args.kind);
+    if kind == modrinth::ProjectType::Modpack {
+        return Err(CliError::Usage(
+            "modpacks must be installed with `modpack install`".to_owned(),
+        ));
+    }
     let game_version = args.minecraft.trim();
     if game_version.is_empty() {
         return Err(CliError::Usage(
@@ -570,7 +640,7 @@ async fn run_download(args: DownloadArgs) -> Result<(), CliError> {
                 }
                 modrinth::ProjectType::Modpack => {
                     return Err(CliError::Usage(
-                        t("cli.error.modpack_command").to_owned(),
+                        "modpacks must be installed with `modpack install`".to_owned(),
                     ));
                 }
             }
@@ -608,6 +678,12 @@ async fn run_modpack(args: ModpackArgs) -> Result<(), CliError> {
     match args.action {
         ModpackAction::Install(args) => run_modpack_install(args).await,
         ModpackAction::Info { file } => {
+            if !file.exists() {
+                return Err(CliError::Usage(format!(
+                    "modpack file not found: {}",
+                    file.display()
+                )));
+            }
             let pack = modpack::inspect(&file)
                 .await
                 .map_err(|error| CliError::Task(error.to_string()))?;
@@ -650,6 +726,12 @@ async fn run_modpack(args: ModpackArgs) -> Result<(), CliError> {
 }
 
 async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
+    if !args.file.exists() {
+        return Err(CliError::Usage(format!(
+            "modpack file not found: {}",
+            args.file.display()
+        )));
+    }
     let mut config = LauncherConfig::load()?;
     let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
     let java = args
@@ -722,6 +804,28 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+fn group_thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut output = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            output.push(',');
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn validate_java_path(path: &Path) -> Result<(), CliError> {
+    if !path.is_file() {
+        return Err(CliError::Usage(format!(
+            "java executable not found: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn run_config(action: ConfigAction) -> Result<(), CliError> {
     let mut config = LauncherConfig::load()?;
     match action {
@@ -754,6 +858,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 config.select_dir(&dir.display().to_string());
             }
             if let Some(java) = java {
+                validate_java_path(&java)?;
                 config.java_path = java.display().to_string();
             }
             if isolate {
@@ -854,6 +959,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                     entry.isolate = false;
                 }
                 if let Some(java) = java {
+                    validate_java_path(&java)?;
                     entry.java_path = java.display().to_string();
                 }
             }

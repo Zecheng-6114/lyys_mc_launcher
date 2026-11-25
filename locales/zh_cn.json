@@ -196,6 +196,7 @@
   "settings.dir_path_hint": "目录路径",
   "settings.global": "全局配置",
   "settings.inherit_global": "继承全局",
+  "settings.java_invalid": "找不到该 Java 可执行文件，使用此路径启动会失败",
   "settings.instance_use_global": "{instance}：使用全局配置",
   "settings.instances_for": "{dir} 的实例配置",
   "settings.instances_hint": "除非在下方单独覆盖，每个实例都使用全局配置",

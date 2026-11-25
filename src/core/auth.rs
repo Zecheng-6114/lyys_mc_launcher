@@ -58,6 +58,7 @@ impl Auth {
             mc_access_expires_at: now + credentials.expires_in,
         };
         self.store.save_microsoft(&account)?;
+        self.ensure_active(&account.profile.id)?;
         Ok(AccountSession {
             profile: account.profile,
             state: account.state,
@@ -67,10 +68,18 @@ impl Auth {
     pub fn add_offline(&self, name: &str) -> Result<AccountSession, AuthError> {
         let profile = offline::profile(name)?;
         self.store.save_offline(&profile)?;
+        self.ensure_active(&profile.id)?;
         Ok(AccountSession {
             profile,
             state: SessionState::Offline,
         })
+    }
+
+    fn ensure_active(&self, uuid: &str) -> Result<(), AuthError> {
+        if self.store.active()?.is_none() {
+            self.store.set_active(uuid)?;
+        }
+        Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<AccountSession>, AuthError> {
