@@ -7,3 +7,4 @@ pub mod launch;
 pub mod logging;
 pub mod modpack;
 pub mod modrinth;
+pub mod region;

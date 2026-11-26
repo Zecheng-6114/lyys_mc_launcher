@@ -9,7 +9,7 @@ use tokio::runtime::Handle;
 use mc_launcher_core::loader::LoaderKind;
 use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
 
-use crate::core::auth::{AccountSession, Auth};
+use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
 use crate::core::config::{DEFAULT_MINECRAFT_DIR, LauncherConfig};
 use crate::core::i18n::{self, Language, t, tf};
 use crate::core::install::{self, AvailableVersion, InstallProgress};
@@ -17,6 +17,7 @@ use crate::core::java::{self, JavaRuntime};
 use crate::core::logging;
 use crate::core::modpack;
 use crate::core::modrinth::{InstallOutcome, ModSearchHit, ModSearchResult, ProjectType};
+use crate::core::region::Region;
 
 use super::background::contour::paint_contour_background;
 
@@ -67,6 +68,12 @@ pub(crate) enum Message {
     DirPicked {
         target: DirPickTarget,
         path: Option<String>,
+    },
+    /// 地区检测结果；`None` 表示时区和 IP 都没能判断出来。
+    Region(Option<Region>),
+    OfflineAdded {
+        name: String,
+        result: Result<(), AuthError>,
     },
 }
 
@@ -217,6 +224,9 @@ pub(crate) struct App {
     pub(crate) accounts: Vec<AccountSession>,
     pub(crate) active: Option<String>,
     pub(crate) offline_name: String,
+    pub(crate) offline_adding: bool,
+    pub(crate) region: Option<Region>,
+    pub(crate) region_requested: bool,
     pub(crate) page: Page,
     pub(crate) install_section: InstallSection,
     // 安装实例
@@ -318,6 +328,9 @@ impl App {
             accounts: Vec::new(),
             active: None,
             offline_name: String::new(),
+            offline_adding: false,
+            region: None,
+            region_requested: false,
             page: Page::Launch,
             install_section: InstallSection::Instance,
             install_version: String::new(),
@@ -403,6 +416,29 @@ impl App {
                     .push(tf("error.accounts_read", &[("error", error.as_str())]));
             }
         }
+    }
+
+    /// 没有有效正版账号时才需要地区检测，用于决定是否可以添加离线账号。
+    pub(crate) fn request_region(&mut self, ctx: &egui::Context) {
+        if self.region.is_some() || self.region_requested {
+            return;
+        }
+        if self
+            .accounts
+            .iter()
+            .any(|account| account.state == SessionState::Valid)
+        {
+            return;
+        }
+        self.region_requested = true;
+        let auth = Arc::clone(&self.auth);
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.handle.spawn(async move {
+            let region = auth.region().await;
+            let _ = tx.send(Message::Region(region));
+            ctx.request_repaint();
+        });
     }
 
     /// 当前活动的 Minecraft 目录；配置异常时退回默认目录。
@@ -827,6 +863,26 @@ impl eframe::App for App {
                         None => self.log.push(t("settings.browse_none").to_owned()),
                     }
                 }
+                Message::Region(region) => self.region = region,
+                Message::OfflineAdded { name, result } => {
+                    self.offline_adding = false;
+                    match result {
+                        Ok(()) => {
+                            if self.offline_name.trim() == name.as_str() {
+                                self.offline_name.clear();
+                            }
+                            self.reload_accounts();
+                        }
+                        Err(error) => {
+                            logging::error("auth", &error.to_string());
+                            let detail = error.message();
+                            self.log.push(tf(
+                                "error.account_add",
+                                &[("error", detail.as_str())],
+                            ));
+                        }
+                    }
+                }
                 Message::Versions(result) => {
                     self.versions_loading = false;
                     match result {
@@ -992,6 +1048,8 @@ impl eframe::App for App {
             self.versions_requested = true;
             self.reload_versions(&ctx);
         }
+
+        self.request_region(&ctx);
 
         let current_dir = self.minecraft_dir().display().to_string();
         if current_dir != self.installed_dir {

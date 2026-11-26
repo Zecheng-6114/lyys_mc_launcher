@@ -6,6 +6,7 @@
   "accounts.add_offline": "添加离线账号",
   "accounts.login_microsoft": "使用 Microsoft 登录",
   "accounts.offline_name": "离线名称：",
+  "accounts.offline_requires_login": "非中国地区需要先登录 Microsoft 正版账号才能创建或使用离线账号",
   "accounts.title": "账号",
 
   "cli.account.active_set": "当前账号已切换为 {account}",
@@ -35,6 +36,7 @@
   "cli.error.auth_no_active": "尚未选择账号",
   "cli.error.auth_no_ownership": "该 Microsoft 账号未拥有 Minecraft: Java 版",
   "cli.error.auth_no_profile": "该 Microsoft 账号还没有 Minecraft 档案",
+  "cli.error.auth_offline_requires_login": "非中国地区需要先登录 Microsoft 正版账号才能创建或使用离线账号",
   "cli.error.auth_offline_token": "离线账号没有游戏令牌",
   "cli.error.auth_relogin": "登录会话已过期，请为该账号重新登录",
   "cli.error.auth_unknown_account": "账号 {account} 不存在",

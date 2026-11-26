@@ -6,6 +6,7 @@
   "accounts.add_offline": "オフラインアカウントを追加",
   "accounts.login_microsoft": "Microsoft でログイン",
   "accounts.offline_name": "オフライン名:",
+  "accounts.offline_requires_login": "中国本土以外では、オフラインアカウントを追加または使用する前に Microsoft アカウントでログインしてください",
   "accounts.title": "アカウント",
 
   "cli.account.active_set": "アクティブアカウントを {account} に設定しました",
@@ -35,6 +36,7 @@
   "cli.error.auth_no_active": "アカウントが選択されていません",
   "cli.error.auth_no_ownership": "この Microsoft アカウントは Minecraft: Java Edition を所有していません",
   "cli.error.auth_no_profile": "この Microsoft アカウントにはまだ Minecraft プロフィールがありません",
+  "cli.error.auth_offline_requires_login": "中国本土以外では、オフラインアカウントを追加または使用する前に Microsoft アカウントでログインしてください",
   "cli.error.auth_offline_token": "オフラインアカウントにはゲームトークンがありません",
   "cli.error.auth_relogin": "ログインセッションの有効期限が切れました。このアカウントで再度ログインしてください",
   "cli.error.auth_unknown_account": "アカウント {account} は存在しません",

@@ -7,9 +7,12 @@ mod offline;
 mod store;
 mod xbox;
 
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use store::{MicrosoftAccount, Store, StoredAccount};
+
+use crate::core::region::{self, Region};
 
 pub use error::AuthError;
 #[allow(unused_imports)]
@@ -22,6 +25,7 @@ const REQUEST_TIMEOUT_SECONDS: u64 = 30;
 pub struct Auth {
     client: reqwest::Client,
     store: Store,
+    region: OnceLock<Region>,
 }
 
 impl Auth {
@@ -33,6 +37,7 @@ impl Auth {
         Ok(Self {
             client,
             store: Store::new()?,
+            region: OnceLock::new(),
         })
     }
 
@@ -65,14 +70,52 @@ impl Auth {
         })
     }
 
-    pub fn add_offline(&self, name: &str) -> Result<AccountSession, AuthError> {
+    pub async fn add_offline(&self, name: &str) -> Result<AccountSession, AuthError> {
         let profile = offline::profile(name)?;
+        if !self.offline_allowed().await? {
+            return Err(AuthError::OfflineRequiresLogin);
+        }
         self.store.save_offline(&profile)?;
         self.ensure_active(&profile.id)?;
         Ok(AccountSession {
             profile,
             state: SessionState::Offline,
         })
+    }
+
+    async fn offline_allowed(&self) -> Result<bool, AuthError> {
+        Ok(self.has_valid_microsoft()? || self.region().await == Some(Region::China))
+    }
+
+    /// Reject using an offline account when the current region requires a
+    /// valid Microsoft account.
+    pub async fn ensure_offline_allowed(&self) -> Result<(), AuthError> {
+        if self.offline_allowed().await? {
+            Ok(())
+        } else {
+            Err(AuthError::OfflineRequiresLogin)
+        }
+    }
+
+    fn has_valid_microsoft(&self) -> Result<bool, AuthError> {
+        Ok(self.store.list()?.iter().any(|account| {
+            matches!(
+                account,
+                StoredAccount::Microsoft(account) if account.state == SessionState::Valid
+            )
+        }))
+    }
+
+    /// Cached region detection. `None` is returned when neither the time zone
+    /// nor the IP lookup produced a result; unknown results are not cached so
+    /// a later attempt can retry.
+    pub async fn region(&self) -> Option<Region> {
+        if let Some(region) = self.region.get() {
+            return Some(*region);
+        }
+        let region = region::detect(&self.client).await?;
+        let _ = self.region.set(region);
+        Some(self.region.get().copied().unwrap_or(region))
     }
 
     fn ensure_active(&self, uuid: &str) -> Result<(), AuthError> {

@@ -32,6 +32,8 @@ pub enum AuthError {
     InvalidName(String),
     #[error("offline accounts have no game token")]
     OfflineAccount,
+    #[error("outside mainland China, sign in with a Microsoft account to add or use offline accounts")]
+    OfflineRequiresLogin,
 }
 
 impl AuthError {
@@ -45,6 +47,7 @@ impl AuthError {
             Self::NoProfile => t("cli.error.auth_no_profile").to_owned(),
             Self::NoActiveAccount => t("cli.error.auth_no_active").to_owned(),
             Self::OfflineAccount => t("cli.error.auth_offline_token").to_owned(),
+            Self::OfflineRequiresLogin => t("cli.error.auth_offline_requires_login").to_owned(),
             Self::UnknownAccount(account) => {
                 tf("cli.error.auth_unknown_account", &[("account", account.as_str())])
             }

@@ -466,7 +466,7 @@ async fn run_account(action: AccountAction) -> Result<(), CliError> {
         }
         AccountAction::List => print_accounts(&auth)?,
         AccountAction::Offline { name } => {
-            let session = auth.add_offline(&name)?;
+            let session = auth.add_offline(&name).await?;
             println!(
                 "{}",
                 tf(
@@ -629,6 +629,9 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
 
     let auth = Auth::new()?;
     let session = auth.refresh_current().await?;
+    if session.state == SessionState::Offline {
+        auth.ensure_offline_allowed().await?;
+    }
     let token;
     let account = if session.state == SessionState::Offline {
         LaunchAccount::Offline(&session.profile)

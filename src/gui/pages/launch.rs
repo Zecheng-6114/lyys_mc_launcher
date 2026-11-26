@@ -159,6 +159,12 @@ async fn launch_task(
             error.message()
         })?;
     if session.state == SessionState::Offline {
+        auth.ensure_offline_allowed()
+            .await
+            .map_err(|error| {
+                logging::error("auth", &error.to_string());
+                error.message()
+            })?;
         spawn_game(
             minecraft_dir,
             version,

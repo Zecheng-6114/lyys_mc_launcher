@@ -6,6 +6,7 @@
   "accounts.add_offline": "Add offline",
   "accounts.login_microsoft": "Login with Microsoft",
   "accounts.offline_name": "Offline name:",
+  "accounts.offline_requires_login": "Outside mainland China, sign in with a Microsoft account to add or use offline accounts",
   "accounts.title": "Accounts",
 
   "cli.account.active_set": "active account set to {account}",
@@ -35,6 +36,7 @@
   "cli.error.auth_no_active": "no account is selected",
   "cli.error.auth_no_ownership": "this Microsoft account does not own Minecraft: Java Edition",
   "cli.error.auth_no_profile": "this Microsoft account has no Minecraft profile yet",
+  "cli.error.auth_offline_requires_login": "Outside mainland China, sign in with a Microsoft account to add or use offline accounts",
   "cli.error.auth_offline_token": "offline accounts have no game token",
   "cli.error.auth_relogin": "the login session has expired, please log in again for this account",
   "cli.error.auth_unknown_account": "account {account} does not exist",
