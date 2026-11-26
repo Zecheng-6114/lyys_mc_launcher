@@ -120,10 +120,7 @@ impl App {
                         &[("name", version.as_str()), ("pid", pid.to_string().as_str())],
                     )
                 }
-                Err(error) => {
-                    logging::error("launch", &error.to_string());
-                    error.message()
-                }
+                Err(error) => error,
             };
             let _ = tx.send(Message::Log(line));
             let _ = tx.send(Message::TaskDone(Task::Launch));
@@ -143,7 +140,10 @@ async fn launch_task(
     let session = auth
         .refresh_current()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            logging::error("auth", &error.to_string());
+            error.message()
+        })?;
     if session.state == SessionState::Offline {
         spawn_game(
             minecraft_dir,
@@ -157,7 +157,10 @@ async fn launch_task(
         let token = auth
             .current_game_token()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                logging::error("auth", &error.to_string());
+                error.message()
+            })?;
         spawn_game(
             minecraft_dir,
             version,
@@ -186,6 +189,9 @@ fn spawn_game(
         game_dir: None,
         isolated: isolate,
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        logging::error("launch", &error.to_string());
+        error.message()
+    })?;
     Ok(child.id())
 }
