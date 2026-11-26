@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use mc_launcher_core::account::Account;
 use mc_launcher_core::command::builder::LaunchOptions;
+use mc_launcher_core::core::version::Library;
 use mc_launcher_core::launcher::Launcher;
 use thiserror::Error;
 
@@ -82,7 +84,8 @@ pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
     let minecraft_dir =
         std::path::absolute(request.minecraft_dir).map_err(LaunchError::Absolute)?;
     let launcher = Launcher::new(&minecraft_dir);
-    let version = launcher.load_version(request.version_id)?;
+    let mut version = launcher.load_version(request.version_id)?;
+    dedupe_libraries(&mut version.libraries);
     let required = version
         .java_version
         .as_ref()
@@ -186,6 +189,59 @@ fn game_directory(
     }
     // 原版启动器把游戏目录固定在 .minecraft 根目录，存档与资源跨版本共享
     Ok(minecraft_dir.to_path_buf())
+}
+
+/// 合并父版本与加载器 profile 后，同一个模块可能带上多个版本（例如 1.21.4
+/// 原版自带 asm 9.6，而 Fabric 0.20.1 要求 asm 9.10.1）。Fabric 启动时会校验
+/// classpath，发现重复的 ASM 就中止启动，因此这里按模块只保留最高版本。
+fn dedupe_libraries(libraries: &mut Vec<Library>) {
+    let mut latest: HashMap<(String, String, Option<String>), (Vec<u32>, usize)> = HashMap::new();
+    let mut dropped = vec![false; libraries.len()];
+    for (index, library) in libraries.iter().enumerate() {
+        let Some((key, version)) = library_module(&library.name) else {
+            continue;
+        };
+        let version = version_key(&version);
+        match latest.get(&key).cloned() {
+            Some((kept, _)) if kept > version => dropped[index] = true,
+            Some((_, kept_index)) => {
+                dropped[kept_index] = true;
+                latest.insert(key, (version, index));
+            }
+            None => {
+                latest.insert(key, (version, index));
+            }
+        }
+    }
+    let mut index = 0;
+    libraries.retain(|_| {
+        let keep = !dropped[index];
+        index += 1;
+        keep
+    });
+}
+
+/// Maven 坐标拆成去重键与版本号，`group:artifact:version[:classifier]`。
+fn library_module(name: &str) -> Option<((String, String, Option<String>), String)> {
+    let mut parts = name.split(':');
+    let group = parts.next()?.to_owned();
+    let artifact = parts.next()?.to_owned();
+    let version = parts.next()?.to_owned();
+    let classifier = parts.next().map(str::to_owned);
+    Some(((group, artifact, classifier), version))
+}
+
+fn version_key(version: &str) -> Vec<u32> {
+    version
+        .split(['.', '-', '_', '+'])
+        .map(|part| {
+            let digits: String = part
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect();
+            digits.parse().unwrap_or(0)
+        })
+        .collect()
 }
 
 fn core_account(account: &LaunchAccount<'_>) -> Account {
