@@ -226,6 +226,8 @@
   "settings.dir_empty": "尚無目錄",
   "settings.dir_name_hint": "名稱（選填）",
   "settings.dir_path_hint": "目錄路徑",
+  "settings.download_mirror": "下載鏡像：",
+  "settings.download_mirror_hint": "選填，遊戲本體與載入器的下載位址會依 BMCLAPI 規則替換為此鏡像；留空使用官方來源",
   "settings.global": "全域設定",
   "settings.inherit_global": "繼承全域",
   "settings.java_invalid": "找不到該 Java 可執行檔，使用此路徑啟動會失敗",

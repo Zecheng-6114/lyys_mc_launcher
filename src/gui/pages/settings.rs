@@ -107,6 +107,20 @@ impl App {
                     ui.label(egui::RichText::new(t("settings.memory_auto")).weak().small());
                 }
             });
+            ui.horizontal(|ui| {
+                ui.label(t("settings.download_mirror"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.download_mirror)
+                        .id_salt("settings_download_mirror")
+                        .hint_text("https://bmclapi2.bangbang93.com")
+                        .desired_width(320.0),
+                );
+            });
+            ui.label(
+                egui::RichText::new(t("settings.download_mirror_hint"))
+                    .weak()
+                    .small(),
+            );
         });
     }
 

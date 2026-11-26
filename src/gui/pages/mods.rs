@@ -643,6 +643,7 @@ impl App {
             PathBuf::from(self.java_path.trim())
         };
         let with_optional = self.modpack_with_optional;
+        let mirror = self.config.download_mirror.trim().to_owned();
         let tx = self.tx.clone();
         let progress_tx = tx.clone();
         let progress_ctx = ctx.clone();
@@ -652,6 +653,7 @@ impl App {
             let options = InstallOptions {
                 minecraft_dir: &dir,
                 java: &java,
+                mirror: &mirror,
                 with_optional,
             };
             let reporter = Arc::new(move |progress: PackProgress| {
@@ -807,6 +809,7 @@ impl App {
             let archive_tx = self.tx.clone();
             let archive_ctx = ctx.clone();
             let done_dir = minecraft_dir.clone();
+            let mirror = self.config.download_mirror.trim().to_owned();
             self.handle.spawn(async move {
                 // 在线安装同样用真实进度回调，而不是空回调
                 let reporter = Arc::new(move |progress: PackProgress| {
@@ -819,6 +822,7 @@ impl App {
                     &loader,
                     &minecraft_dir,
                     &java,
+                    &mirror,
                     &mut move |progress: modrinth::ContentProgress| {
                         let _ = archive_tx.send(Message::ModpackProgress(progress.describe()));
                         archive_ctx.request_repaint();
@@ -889,6 +893,7 @@ async fn install_modpack_from_modrinth(
     loader: &str,
     minecraft_dir: &Path,
     java: &Path,
+    mirror: &str,
     archive_progress: &mut (dyn FnMut(modrinth::ContentProgress) + Send),
     reporter: Arc<dyn Fn(PackProgress) + Send + Sync>,
 ) -> Result<modpack::InstallReport, String> {
@@ -903,6 +908,7 @@ async fn install_modpack_from_modrinth(
     let options = InstallOptions {
         minecraft_dir,
         java,
+        mirror,
         with_optional: false,
     };
     let result = modpack::install_file(&archive, &options, reporter).await;

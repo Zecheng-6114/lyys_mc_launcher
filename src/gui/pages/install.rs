@@ -195,8 +195,9 @@ impl App {
         self.versions_error = None;
         let tx = self.tx.clone();
         let ctx = ctx.clone();
+        let mirror = self.config.download_mirror.trim().to_owned();
         self.handle.spawn(async move {
-            let result = install::available_versions()
+            let result = install::available_versions(&mirror)
                 .await
                 .map_err(|error| error.to_string());
             let _ = tx.send(Message::Versions(result));
@@ -216,8 +217,9 @@ impl App {
         self.loader_versions_key = Some(key.clone());
         let tx = self.tx.clone();
         let ctx = ctx.clone();
+        let mirror = self.config.download_mirror.trim().to_owned();
         self.handle.spawn_blocking(move || {
-            let result = install::loader_versions(kind, &minecraft_version)
+            let result = install::loader_versions(kind, &minecraft_version, &mirror)
                 .map_err(|error| error.to_string());
             let _ = tx.send(Message::LoaderVersions { key, result });
             ctx.request_repaint();
@@ -259,6 +261,7 @@ impl App {
         };
         let loader_name = self.install_loader.label();
         let loader = self.install_loader.to_spec(&self.install_loader_version);
+        let mirror = self.config.download_mirror.trim().to_owned();
         let tx = self.tx.clone();
         let progress_tx = tx.clone();
         let ctx = ctx.clone();
@@ -274,6 +277,7 @@ impl App {
                         &version,
                         loader,
                         &java,
+                        &mirror,
                         &mut reporter,
                     ) {
                         Ok(result) => {
@@ -298,7 +302,8 @@ impl App {
                         }
                     }
                 }
-                None => match install::install_with_reporter(&dir, &version, &mut reporter) {
+                None => match install::install_with_reporter(&dir, &version, &mirror, &mut reporter)
+                {
                     Ok(_) => {
                         logging::info(&format!(
                             "installed {version} into {}",

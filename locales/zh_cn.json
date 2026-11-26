@@ -226,6 +226,8 @@
   "settings.dir_empty": "还没有目录",
   "settings.dir_name_hint": "名称（可选）",
   "settings.dir_path_hint": "目录路径",
+  "settings.download_mirror": "下载镜像：",
+  "settings.download_mirror_hint": "选填，游戏本体与加载器的下载地址会按 BMCLAPI 规则替换为该镜像；留空使用官方源",
   "settings.global": "全局配置",
   "settings.inherit_global": "继承全局",
   "settings.java_invalid": "找不到该 Java 可执行文件，使用此路径启动会失败",

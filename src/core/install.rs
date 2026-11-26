@@ -3,14 +3,25 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use mc_launcher_core::install::client::{install_version_files, version_json_path};
-use mc_launcher_core::install::loader::{InstallerInvocation, run_loader_installer};
-use mc_launcher_core::install::{InstallRequest, InstallResult};
+use mc_launcher_core::compatibility::{CompatibilityPolicy, apply_compatibility};
+use mc_launcher_core::core::version::VersionJson;
+use mc_launcher_core::install::assets::{
+    AssetIndexJson, asset_index_path, plan_asset_index_download,
+    plan_asset_object_downloads_from_index,
+};
+use mc_launcher_core::install::client::{version_json_path, write_version_json};
+use mc_launcher_core::install::loader::{
+    InstallerInvocation, run_loader_installer, write_loader_profile,
+};
+use mc_launcher_core::install::natives::extract_natives_for_platform;
+use mc_launcher_core::install::vanilla::plan_vanilla_downloads_for_platform;
+use mc_launcher_core::install::InstallResult;
 use mc_launcher_core::launcher::Launcher;
 use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
 use mc_launcher_core::loader::{LoaderKind, fabric, forge, neoforge, quilt};
 use mc_launcher_core::net::download::{DownloadPlan, DownloadTask, execute_plan};
 use mc_launcher_core::net::http;
+use mc_launcher_core::platform::Platform;
 use mc_launcher_core::progress::ProgressEvent;
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +32,48 @@ const VERSION_MANIFEST_URL: &str =
 const REQUEST_TIMEOUT_SECONDS: u64 = 30;
 const FABRIC_GAME_LOADERS_URL: &str = "https://meta.fabricmc.net/v2/versions/loader";
 const QUILT_GAME_LOADERS_URL: &str = "https://meta.quiltmc.org/v3/versions/loader";
+const FORGE_METADATA_URL: &str =
+    "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
+const NEOFORGE_METADATA_URL: &str =
+    "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
 const VERSIONS_CACHE: &str = "versions.json";
 const LOADER_VERSIONS_CACHE: &str = "loader_versions.json";
+
+/// 官方下载域名到镜像路径的对应关系，遵循 BMCLAPI 的路径约定。
+const MIRROR_MAPPINGS: &[(&str, &str)] = &[
+    ("https://launchermeta.mojang.com", ""),
+    ("https://piston-meta.mojang.com", ""),
+    ("https://piston-data.mojang.com", ""),
+    ("https://launcher.mojang.com", ""),
+    ("https://resources.download.minecraft.net", "/assets"),
+    ("https://libraries.minecraft.net", "/maven"),
+    ("https://maven.fabricmc.net", "/maven"),
+    ("https://meta.fabricmc.net", "/fabric-meta"),
+    ("https://meta.quiltmc.org", "/quilt-meta"),
+    ("https://maven.minecraftforge.net", "/maven"),
+    ("https://maven.neoforged.net/releases", "/maven"),
+];
+
+/// 把官方下载地址替换成镜像地址；`mirror` 为空或地址已在镜像上时保持原样。
+fn mirror_url(url: &str, mirror: &str) -> String {
+    let mirror = mirror.trim().trim_end_matches('/');
+    if mirror.is_empty() || url.starts_with(mirror) {
+        return url.to_owned();
+    }
+    for &(origin, suffix) in MIRROR_MAPPINGS {
+        if let Some(rest) = url.strip_prefix(origin) {
+            return format!("{mirror}{suffix}{rest}");
+        }
+    }
+    url.to_owned()
+}
+
+fn mirrored_plan(mut plan: DownloadPlan, mirror: &str) -> DownloadPlan {
+    for task in &mut plan.tasks {
+        task.url = mirror_url(&task.url, mirror);
+    }
+    plan
+}
 
 #[derive(Deserialize)]
 struct GameLoaderEntry {
@@ -51,15 +102,16 @@ struct ManifestEntry {
     id: String,
     #[serde(rename = "type")]
     kind: String,
+    url: String,
 }
 
-/// 从 Mojang 拉取版本清单，顺序为新版本在前。
-pub async fn available_versions() -> Result<Vec<AvailableVersion>, reqwest::Error> {
+/// 从 Mojang 或镜像拉取版本清单，顺序为新版本在前。
+pub async fn available_versions(mirror: &str) -> Result<Vec<AvailableVersion>, reqwest::Error> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
         .build()?;
     let manifest: VersionManifest = client
-        .get(VERSION_MANIFEST_URL)
+        .get(mirror_url(VERSION_MANIFEST_URL, mirror))
         .send()
         .await?
         .error_for_status()?
@@ -163,11 +215,12 @@ pub struct InstallProgress {
 pub fn install(
     minecraft_dir: &Path,
     version_id: &str,
+    mirror: &str,
 ) -> Result<InstallResult, mc_launcher_core::LauncherError> {
     let mut downloaded = 0_u64;
     let mut skipped = 0_u64;
     let mut shown = false;
-    let result = run_install(minecraft_dir, version_id, None, |event: ProgressEvent| {
+    let result = run_install(minecraft_dir, version_id, None, mirror, |event: ProgressEvent| {
         match event {
             ProgressEvent::TaskFinished { .. } => downloaded += 1,
             ProgressEvent::TaskSkipped { .. } => skipped += 1,
@@ -195,9 +248,10 @@ pub fn install(
 pub fn install_with_reporter(
     minecraft_dir: &Path,
     version_id: &str,
+    mirror: &str,
     reporter: &mut dyn FnMut(InstallProgress),
 ) -> Result<InstallResult, mc_launcher_core::LauncherError> {
-    install_reporting(minecraft_dir, version_id, None, reporter)
+    install_reporting(minecraft_dir, version_id, None, mirror, reporter)
 }
 
 /// 与 [`install_with_reporter`] 相同，但可以同时安装指定的模组加载器。
@@ -208,13 +262,19 @@ pub fn install_loader_with_reporter(
     version_id: &str,
     loader: LoaderSpec,
     java_executable: &Path,
+    mirror: &str,
     reporter: &mut dyn FnMut(InstallProgress),
 ) -> Result<InstallResult, mc_launcher_core::LauncherError> {
     match loader {
-        LoaderSpec::Forge { .. } | LoaderSpec::NeoForge { .. } => {
-            install_with_installer(minecraft_dir, version_id, loader, java_executable, reporter)
-        }
-        loader => install_reporting(minecraft_dir, version_id, Some(loader), reporter),
+        LoaderSpec::Forge { .. } | LoaderSpec::NeoForge { .. } => install_with_installer(
+            minecraft_dir,
+            version_id,
+            loader,
+            java_executable,
+            mirror,
+            reporter,
+        ),
+        loader => install_reporting(minecraft_dir, version_id, Some(loader), mirror, reporter),
     }
 }
 
@@ -252,17 +312,19 @@ fn ensure_launcher_profiles(minecraft_dir: &Path) {
 pub fn loader_versions(
     kind: LoaderKind,
     minecraft_version: &str,
+    mirror: &str,
 ) -> Result<Vec<String>, mc_launcher_core::LauncherError> {
     match kind {
         LoaderKind::Fabric => {
             if minecraft_version.trim().is_empty() {
-                return Ok(fabric::list_loader_versions()?
-                    .into_iter()
-                    .map(|version| version.version)
-                    .collect());
+                let versions: Vec<fabric::FabricLoaderVersion> =
+                    http::get_json(&mirror_url(FABRIC_GAME_LOADERS_URL, mirror))?;
+                return Ok(versions.into_iter().map(|version| version.version).collect());
             }
-            let entries: Vec<GameLoaderEntry> =
-                http::get_json(&format!("{FABRIC_GAME_LOADERS_URL}/{minecraft_version}"))?;
+            let entries: Vec<GameLoaderEntry> = http::get_json(&mirror_url(
+                &format!("{FABRIC_GAME_LOADERS_URL}/{minecraft_version}"),
+                mirror,
+            ))?;
             Ok(entries
                 .into_iter()
                 .map(|entry| entry.loader.version)
@@ -270,13 +332,14 @@ pub fn loader_versions(
         }
         LoaderKind::Quilt => {
             if minecraft_version.trim().is_empty() {
-                return Ok(quilt::list_loader_versions()?
-                    .into_iter()
-                    .map(|version| version.version)
-                    .collect());
+                let versions: Vec<quilt::QuiltLoaderVersion> =
+                    http::get_json(&mirror_url(QUILT_GAME_LOADERS_URL, mirror))?;
+                return Ok(versions.into_iter().map(|version| version.version).collect());
             }
-            let entries: Vec<GameLoaderEntry> =
-                http::get_json(&format!("{QUILT_GAME_LOADERS_URL}/{minecraft_version}"))?;
+            let entries: Vec<GameLoaderEntry> = http::get_json(&mirror_url(
+                &format!("{QUILT_GAME_LOADERS_URL}/{minecraft_version}"),
+                mirror,
+            ))?;
             Ok(entries
                 .into_iter()
                 .map(|entry| entry.loader.version)
@@ -284,7 +347,7 @@ pub fn loader_versions(
         }
         LoaderKind::Forge => {
             let prefix = format!("{minecraft_version}-");
-            let mut versions: Vec<String> = forge::list_forge_versions()?
+            let mut versions: Vec<String> = forge_versions(mirror)?
                 .into_iter()
                 .filter(|version| version.starts_with(&prefix))
                 .collect();
@@ -294,7 +357,7 @@ pub fn loader_versions(
         LoaderKind::NeoForge => {
             let prefix = neoforge_version_prefix(minecraft_version);
             let mut versions: Vec<String> = match prefix {
-                Some(prefix) => neoforge::list_neoforge_versions()?
+                Some(prefix) => neoforge_versions(mirror)?
                     .into_iter()
                     .filter(|version| version.starts_with(&prefix))
                     .collect(),
@@ -306,11 +369,22 @@ pub fn loader_versions(
     }
 }
 
+fn forge_versions(mirror: &str) -> Result<Vec<String>, mc_launcher_core::LauncherError> {
+    let xml = http::get_text(&mirror_url(FORGE_METADATA_URL, mirror))?;
+    Ok(forge::parse_maven_metadata(&xml)?.versions)
+}
+
+fn neoforge_versions(mirror: &str) -> Result<Vec<String>, mc_launcher_core::LauncherError> {
+    let xml = http::get_text(&mirror_url(NEOFORGE_METADATA_URL, mirror))?;
+    Ok(neoforge::parse_maven_metadata(&xml)?.versions)
+}
+
 fn install_with_installer(
     minecraft_dir: &Path,
     minecraft_version: &str,
     loader: LoaderSpec,
     java_executable: &Path,
+    mirror: &str,
     reporter: &mut dyn FnMut(InstallProgress),
 ) -> Result<InstallResult, mc_launcher_core::LauncherError> {
     ensure_java_available(java_executable)?;
@@ -336,19 +410,21 @@ fn install_with_installer(
     };
 
     let launcher = Launcher::new(minecraft_dir);
-    launcher.install_with_progress(
-        InstallRequest::vanilla(minecraft_version),
+    install_vanilla(
+        minecraft_dir,
+        minecraft_version,
+        mirror,
         &mut reporter_bridge,
     )?;
 
     let (kind, loader_version) = match &loader {
         LoaderSpec::Forge { version } => (
             LoaderKind::Forge,
-            resolve_installer_version(LoaderKind::Forge, minecraft_version, version)?,
+            resolve_installer_version(LoaderKind::Forge, minecraft_version, version, mirror)?,
         ),
         LoaderSpec::NeoForge { version } => (
             LoaderKind::NeoForge,
-            resolve_installer_version(LoaderKind::NeoForge, minecraft_version, version)?,
+            resolve_installer_version(LoaderKind::NeoForge, minecraft_version, version, mirror)?,
         ),
         _ => unreachable!("only installer-based loaders reach this path"),
     };
@@ -358,11 +434,14 @@ fn install_with_installer(
         LoaderKind::NeoForge => "neoforge",
         _ => unreachable!(),
     };
-    let installer_url = match kind {
-        LoaderKind::Forge => forge::installer_url(&loader_version),
-        LoaderKind::NeoForge => neoforge::installer_url(&loader_version),
-        _ => unreachable!(),
-    };
+    let installer_url = mirror_url(
+        &match kind {
+            LoaderKind::Forge => forge::installer_url(&loader_version),
+            LoaderKind::NeoForge => neoforge::installer_url(&loader_version),
+            _ => unreachable!(),
+        },
+        mirror,
+    );
     let installer_path = minecraft_dir
         .join("versions")
         .join(".installers")
@@ -396,7 +475,7 @@ fn install_with_installer(
         _ => unreachable!(),
     };
     let merged = launcher.load_version(&version_id)?;
-    install_version_files(&merged, minecraft_dir, &mut reporter_bridge)?;
+    install_version_files(&merged, minecraft_dir, mirror, &mut reporter_bridge)?;
     Ok(InstallResult { version_id })
 }
 
@@ -404,6 +483,7 @@ fn resolve_installer_version(
     kind: LoaderKind,
     minecraft_version: &str,
     version: &LoaderVersion,
+    mirror: &str,
 ) -> Result<String, mc_launcher_core::LauncherError> {
     match version {
         LoaderVersion::Exact(version) => Ok(match kind {
@@ -412,15 +492,11 @@ fn resolve_installer_version(
         }),
         LoaderVersion::Latest | LoaderVersion::LatestStable => match kind {
             LoaderKind::Forge => Ok(
-                forge::latest_for_minecraft(&forge::list_forge_versions()?, minecraft_version)?
-                    .to_owned(),
+                forge::latest_for_minecraft(&forge_versions(mirror)?, minecraft_version)?.to_owned(),
             ),
             LoaderKind::NeoForge => Ok(
-                neoforge::latest_for_minecraft(
-                    &neoforge::list_neoforge_versions()?,
-                    minecraft_version,
-                )?
-                .to_owned(),
+                neoforge::latest_for_minecraft(&neoforge_versions(mirror)?, minecraft_version)?
+                    .to_owned(),
             ),
             _ => unreachable!(),
         },
@@ -493,12 +569,13 @@ fn install_reporting(
     minecraft_dir: &Path,
     version_id: &str,
     loader: Option<LoaderSpec>,
+    mirror: &str,
     reporter: &mut dyn FnMut(InstallProgress),
 ) -> Result<InstallResult, mc_launcher_core::LauncherError> {
     let mut downloaded = 0_u64;
     let mut skipped = 0_u64;
     let mut current: Option<String> = None;
-    run_install(minecraft_dir, version_id, loader, |event: ProgressEvent| {
+    run_install(minecraft_dir, version_id, loader, mirror, |event: ProgressEvent| {
         match event {
             ProgressEvent::TaskStarted { label, .. } => current = Some(label),
             ProgressEvent::TaskFinished { .. } => {
@@ -520,19 +597,159 @@ fn run_install<F>(
     minecraft_dir: &Path,
     version_id: &str,
     loader: Option<LoaderSpec>,
+    mirror: &str,
     mut on_event: F,
 ) -> Result<InstallResult, mc_launcher_core::LauncherError>
 where
     F: FnMut(ProgressEvent),
 {
-    let launcher = Launcher::new(minecraft_dir);
-    let request = match loader {
-        Some(loader) => InstallRequest {
-            minecraft_version: version_id.to_owned(),
-            loader: Some(loader),
-            java: mc_launcher_core::install::JavaInstallPolicy::Auto,
-        },
-        None => InstallRequest::vanilla(version_id),
+    match loader {
+        Some(loader @ (LoaderSpec::Fabric { .. } | LoaderSpec::Quilt { .. })) => {
+            install_vanilla(minecraft_dir, version_id, mirror, &mut on_event)?;
+            install_native_loader(minecraft_dir, version_id, &loader, mirror, &mut on_event)
+        }
+        Some(_) => unreachable!("installer-based loaders are handled by install_with_installer"),
+        None => {
+            install_vanilla(minecraft_dir, version_id, mirror, &mut on_event)?;
+            Ok(InstallResult {
+                version_id: version_id.to_owned(),
+            })
+        }
+    }
+}
+
+fn install_vanilla<F>(
+    minecraft_dir: &Path,
+    version_id: &str,
+    mirror: &str,
+    reporter: &mut F,
+) -> Result<(), mc_launcher_core::LauncherError>
+where
+    F: FnMut(ProgressEvent),
+{
+    let version = fetch_version_json(version_id, mirror)?;
+    write_version_json(minecraft_dir, &version)?;
+    install_version_files(&version, minecraft_dir, mirror, reporter)
+}
+
+fn fetch_version_json(
+    version_id: &str,
+    mirror: &str,
+) -> Result<VersionJson, mc_launcher_core::LauncherError> {
+    let manifest: VersionManifest =
+        http::get_json(&mirror_url(VERSION_MANIFEST_URL, mirror))?;
+    let entry = manifest
+        .versions
+        .iter()
+        .find(|entry| entry.id == version_id)
+        .ok_or_else(|| mc_launcher_core::LauncherError::InvalidVersionId {
+            id: version_id.to_owned(),
+        })?;
+    http::get_json(&mirror_url(&entry.url, mirror))
+}
+
+fn install_native_loader<F>(
+    minecraft_dir: &Path,
+    minecraft_version: &str,
+    loader: &LoaderSpec,
+    mirror: &str,
+    reporter: &mut F,
+) -> Result<InstallResult, mc_launcher_core::LauncherError>
+where
+    F: FnMut(ProgressEvent),
+{
+    let (profile, profile_name) = match loader {
+        LoaderSpec::Fabric { version } => {
+            let loader_version = match version {
+                LoaderVersion::Exact(version) => version.clone(),
+                LoaderVersion::Latest | LoaderVersion::LatestStable => {
+                    let versions: Vec<fabric::FabricLoaderVersion> =
+                        http::get_json(&mirror_url(FABRIC_GAME_LOADERS_URL, mirror))?;
+                    fabric::latest_stable_loader(&versions)?.version.clone()
+                }
+            };
+            let profile: VersionJson = http::get_json(&mirror_url(
+                &format!(
+                    "{FABRIC_GAME_LOADERS_URL}/{minecraft_version}/{loader_version}/profile/json"
+                ),
+                mirror,
+            ))?;
+            (profile, "fabric profile")
+        }
+        LoaderSpec::Quilt { version } => {
+            let loader_version = match version {
+                LoaderVersion::Exact(version) => version.clone(),
+                LoaderVersion::Latest | LoaderVersion::LatestStable => {
+                    let versions: Vec<quilt::QuiltLoaderVersion> =
+                        http::get_json(&mirror_url(QUILT_GAME_LOADERS_URL, mirror))?;
+                    quilt::latest_loader(&versions)?.version.clone()
+                }
+            };
+            let profile: VersionJson = http::get_json(&mirror_url(
+                &format!(
+                    "{QUILT_GAME_LOADERS_URL}/{minecraft_version}/{loader_version}/profile/json"
+                ),
+                mirror,
+            ))?;
+            (profile, "quilt profile")
+        }
+        _ => unreachable!("only Fabric and Quilt use native loader profiles"),
     };
-    launcher.install_with_progress(request, &mut on_event)
+    let version_id =
+        profile
+            .id
+            .clone()
+            .ok_or_else(|| mc_launcher_core::LauncherError::MissingField {
+                context: profile_name.to_owned(),
+                field: "id".to_owned(),
+            })?;
+    write_loader_profile(minecraft_dir, &profile)?;
+    let merged = Launcher::new(minecraft_dir).load_version(&version_id)?;
+    install_version_files(&merged, minecraft_dir, mirror, reporter)?;
+    Ok(InstallResult { version_id })
+}
+
+fn install_version_files<F>(
+    version: &VersionJson,
+    minecraft_dir: &Path,
+    mirror: &str,
+    reporter: &mut F,
+) -> Result<(), mc_launcher_core::LauncherError>
+where
+    F: FnMut(ProgressEvent),
+{
+    let platform = Platform::current();
+    let compatibility = apply_compatibility(version, platform, CompatibilityPolicy::Auto);
+    let version = &compatibility.version;
+    let version_id =
+        version
+            .id
+            .as_deref()
+            .ok_or_else(|| mc_launcher_core::LauncherError::MissingField {
+                context: "version json".to_owned(),
+                field: "id".to_owned(),
+            })?;
+
+    let plan = plan_vanilla_downloads_for_platform(
+        version,
+        minecraft_dir,
+        platform,
+        CompatibilityPolicy::Disabled,
+    )?;
+    execute_plan(&mirrored_plan(plan, mirror), reporter)?;
+
+    let index_plan = DownloadPlan {
+        tasks: plan_asset_index_download(version, minecraft_dir)?,
+    };
+    execute_plan(&mirrored_plan(index_plan, mirror), reporter)?;
+
+    if let Some(asset_index) = &version.asset_index {
+        let index: AssetIndexJson =
+            serde_json::from_slice(&std::fs::read(asset_index_path(minecraft_dir, &asset_index.id))?)?;
+        let object_plan = plan_asset_object_downloads_from_index(&index, minecraft_dir);
+        execute_plan(&mirrored_plan(object_plan, mirror), reporter)?;
+    }
+
+    extract_natives_for_platform(&version.libraries, minecraft_dir, version_id, platform)?;
+    Ok(())
 }

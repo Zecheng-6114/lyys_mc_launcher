@@ -549,6 +549,7 @@ impl App {
         self.config.isolate = self.isolate;
         self.config.memory_mb = self.memory_mb;
         self.config.language = i18n::current().code().to_owned();
+        self.config.download_mirror = self.config.download_mirror.trim().to_owned();
         match self.config.save() {
             Ok(path) => {
                 let path = path.display().to_string();

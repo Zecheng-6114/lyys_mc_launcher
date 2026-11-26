@@ -86,6 +86,9 @@ pub struct LauncherConfig {
     /// Language code (`en_us`, `zh_cn`, `zh_tw`, `ja_jp`); empty means auto-detect.
     #[serde(default)]
     pub language: String,
+    /// Download mirror root; empty means the official sources.
+    #[serde(default)]
+    pub download_mirror: String,
     /// 旧版配置的单一目录，用于加载时迁移；保存时同步为当前目录，供旧版本读取。
     #[serde(default, rename = "minecraft_dir")]
     legacy_minecraft_dir: String,

@@ -226,6 +226,8 @@
   "settings.dir_empty": "ディレクトリがありません",
   "settings.dir_name_hint": "名前（任意）",
   "settings.dir_path_hint": "ディレクトリパス",
+  "settings.download_mirror": "ダウンロードミラー：",
+  "settings.download_mirror_hint": "任意。ゲーム本体とローダーのダウンロード先を BMCLAPI の規則でこのミラーに置き換えます。空欄なら公式ソースを使用します",
   "settings.global": "グローバル設定",
   "settings.inherit_global": "グローバルを継承",
   "settings.java_invalid": "この Java 実行ファイルが見つかりません。このパスでは起動に失敗します",

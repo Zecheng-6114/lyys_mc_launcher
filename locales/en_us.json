@@ -226,6 +226,8 @@
   "settings.dir_empty": "no directory yet",
   "settings.dir_name_hint": "name (optional)",
   "settings.dir_path_hint": "directory path",
+  "settings.download_mirror": "Download mirror:",
+  "settings.download_mirror_hint": "Optional; game and loader downloads are rewritten to this mirror using the BMCLAPI layout. Leave empty to use the official sources.",
   "settings.global": "Global configuration",
   "settings.inherit_global": "inherit global",
   "settings.java_invalid": "Java executable not found; the game will fail to start with this path",

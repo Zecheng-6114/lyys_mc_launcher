@@ -537,6 +537,7 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
     // 核心库的下载走阻塞式 HTTP 客户端，放在阻塞线程池里执行，避免和异步运行时互相卡住
     let install_dir = minecraft_dir.clone();
     let install_version = version_id.clone();
+    let install_mirror = config.download_mirror.trim().to_owned();
     tokio::task::spawn_blocking(move || match loader {
         Some(loader) => {
             let mut printed = false;
@@ -558,6 +559,7 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
                 &install_version,
                 loader,
                 &java,
+                &install_mirror,
                 &mut reporter,
             );
             if printed {
@@ -565,7 +567,7 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
             }
             result
         }
-        None => install::install(&install_dir, &install_version),
+        None => install::install(&install_dir, &install_version, &install_mirror),
     })
     .await
     .map_err(|error| CliError::Task(error.to_string()))??;
@@ -894,9 +896,11 @@ async fn run_modpack_install(args: ModpackInstallArgs) -> Result<(), CliError> {
         .or_else(|| configured_java(&config.java_path))
         .or_else(|| get_java_executable().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("java"));
+    let mirror = config.download_mirror.trim().to_owned();
     let options = InstallOptions {
         minecraft_dir: &minecraft_dir,
         java: &java,
+        mirror: &mirror,
         with_optional: args.with_optional,
     };
     println!("{}", t("modpack.installing"));

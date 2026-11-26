@@ -230,6 +230,8 @@ pub struct InstallOptions<'a> {
     pub minecraft_dir: &'a Path,
     /// 运行 Forge/NeoForge 安装器时使用的 Java。
     pub java: &'a Path,
+    /// 游戏本体与加载器的下载镜像；为空时使用官方源。
+    pub mirror: &'a str,
     pub with_optional: bool,
 }
 
@@ -268,6 +270,7 @@ pub async fn install_file(
     let java = options.java.to_path_buf();
     let game_version = manifest.game_version.trim().to_owned();
     let loader = manifest.loader.clone();
+    let mirror = options.mirror.trim().to_owned();
     let report = reporter.clone();
     let (version_id, minecraft_time, loader_time) = tokio::task::spawn_blocking(move || {
         let mut progress = |progress: install::InstallProgress| {
@@ -280,7 +283,7 @@ pub async fn install_file(
         // 基础版本与加载器分开安装，既能分别计时，也方便各自重试
         let minecraft_started = Instant::now();
         let vanilla = install_with_retry(|| {
-            install::install_with_reporter(&minecraft_dir, &game_version, &mut progress)
+            install::install_with_reporter(&minecraft_dir, &game_version, &mirror, &mut progress)
         })?;
         let minecraft_time = minecraft_started.elapsed();
 
@@ -294,6 +297,7 @@ pub async fn install_file(
                 &game_version,
                 spec.clone(),
                 &java,
+                &mirror,
                 &mut progress,
             )
         })?;
