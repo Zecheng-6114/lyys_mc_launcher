@@ -60,10 +60,21 @@ impl App {
                         .map(|path| path.display().to_string())
                         .unwrap_or_else(|| t("settings.java.auto").to_owned());
                     let isolation = if isolate { t("common.on") } else { t("common.off") };
+                    let memory_mb = self.effective_memory(&selected);
+                    let memory = if memory_mb == 0 {
+                        t("settings.memory_auto").to_owned()
+                    } else {
+                        format!("{memory_mb} MB")
+                    };
                     ui.label(
                         egui::RichText::new(tf(
                             "launch.java_summary",
-                            &[("java", java.as_str()), ("isolation", isolation), ("source", source)],
+                            &[
+                                ("java", java.as_str()),
+                                ("memory", memory.as_str()),
+                                ("isolation", isolation),
+                                ("source", source),
+                            ],
                         ))
                         .weak()
                         .small(),
@@ -99,6 +110,7 @@ impl App {
         let java = self.effective_java(&version);
         let java_candidates = self.java_candidates();
         let isolate = self.effective_isolate(&version);
+        let memory_mb = self.effective_memory(&version);
         let auth = Arc::clone(&self.auth);
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -110,6 +122,7 @@ impl App {
                 java.as_deref(),
                 &java_candidates,
                 isolate,
+                memory_mb,
             )
             .await;
             let line = match result {
@@ -136,6 +149,7 @@ async fn launch_task(
     java: Option<&Path>,
     java_candidates: &[String],
     isolate: bool,
+    memory_mb: u32,
 ) -> Result<u32, String> {
     let session = auth
         .refresh_current()
@@ -152,6 +166,7 @@ async fn launch_task(
             java,
             java_candidates,
             isolate,
+            memory_mb,
         )
     } else {
         let token = auth
@@ -168,6 +183,7 @@ async fn launch_task(
             java,
             java_candidates,
             isolate,
+            memory_mb,
         )
     }
 }
@@ -179,6 +195,7 @@ fn spawn_game(
     java: Option<&Path>,
     java_candidates: &[String],
     isolate: bool,
+    memory_mb: u32,
 ) -> Result<u32, String> {
     let child = launch::launch(LaunchRequest {
         minecraft_dir,
@@ -188,6 +205,7 @@ fn spawn_game(
         java_candidates,
         game_dir: None,
         isolated: isolate,
+        memory_mb,
     })
     .map_err(|error| {
         logging::error("launch", &error.to_string());

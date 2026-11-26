@@ -210,6 +210,9 @@ struct LaunchArgs {
     /// Java executable to run the game with.
     #[arg(long)]
     java: Option<PathBuf>,
+    /// Maximum Java heap in MiB for this launch; 0 uses the JVM default.
+    #[arg(long)]
+    memory: Option<u32>,
     /// Override the configured version isolation for this launch.
     #[arg(long, conflicts_with_all = ["game_dir", "no_isolate"])]
     isolate: bool,
@@ -242,6 +245,9 @@ enum ConfigAction {
         /// Disable version isolation.
         #[arg(long)]
         no_isolate: bool,
+        /// Maximum Java heap in MiB; 0 uses the JVM default.
+        #[arg(long)]
+        memory: Option<u32>,
     },
     /// Manage the Minecraft directories known to the launcher.
     Dir {
@@ -263,7 +269,7 @@ enum ConfigAction {
         /// Version or instance id to configure.
         version: String,
         /// Fall back to the global configuration.
-        #[arg(long, conflicts_with_all = ["isolate", "no_isolate", "java"])]
+        #[arg(long, conflicts_with_all = ["isolate", "no_isolate", "java", "memory"])]
         global: bool,
         /// Enable version isolation for this instance.
         #[arg(long, conflicts_with = "no_isolate")]
@@ -274,6 +280,9 @@ enum ConfigAction {
         /// Java executable for this instance.
         #[arg(long)]
         java: Option<PathBuf>,
+        /// Maximum Java heap in MiB for this instance; 0 inherits the global value.
+        #[arg(long)]
+        memory: Option<u32>,
     },
 }
 
@@ -590,6 +599,7 @@ fn parse_loader(name: &str, version: Option<String>) -> Result<LoaderSpec, CliEr
 }
 
 async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
+    validate_memory(args.memory)?;
     let config = LauncherConfig::load()?;
     let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
     let installed = install::installed_versions(&minecraft_dir)
@@ -611,6 +621,9 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
     } else {
         config.effective_isolate(&args.version)
     };
+    let memory_mb = args
+        .memory
+        .unwrap_or_else(|| config.effective_memory(&args.version));
 
     let auth = Auth::new()?;
     let session = auth.refresh_current().await?;
@@ -629,6 +642,7 @@ async fn run_launch(args: LaunchArgs) -> Result<(), CliError> {
         java_candidates: &config.java_versions,
         game_dir: args.game_dir.as_deref(),
         isolated: isolate,
+        memory_mb,
     })?;
     println!(
         "{}",
@@ -983,6 +997,11 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 config.java_path.trim()
             };
             println!("{}", tf("cli.config.java_path", &[("path", java)]));
+            let memory = memory_label(config.memory_mb);
+            println!(
+                "{}",
+                tf("cli.config.memory", &[("memory", memory.as_str())])
+            );
             if !config.java_versions.is_empty() {
                 println!("{}", t("cli.java.known"));
                 for path in &config.java_versions {
@@ -997,7 +1016,9 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             java,
             isolate,
             no_isolate,
+            memory,
         } => {
+            validate_memory(memory)?;
             if let Some(dir) = minecraft_dir {
                 config.select_dir(&dir.display().to_string());
             }
@@ -1009,6 +1030,9 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 config.isolate = true;
             } else if no_isolate {
                 config.isolate = false;
+            }
+            if let Some(memory) = memory {
+                config.memory_mb = memory;
             }
             let path = config.save()?;
             let path = path.display().to_string();
@@ -1077,8 +1101,10 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
             isolate,
             no_isolate,
             java,
+            memory,
         } => {
             // 实例覆盖只作用于当前目录，避免不同目录下的同名版本互相影响
+            validate_memory(memory)?;
             if config.minecraft_dirs.is_empty() {
                 config.select_dir(config::DEFAULT_MINECRAFT_DIR);
             }
@@ -1094,7 +1120,7 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                     },
                 );
             } else {
-                if !isolate && !no_isolate && java.is_none() {
+                if !isolate && !no_isolate && java.is_none() && memory.is_none() {
                     return Err(usage("cli.error.instance_flags", &[]));
                 }
                 let entry = dir.instances.entry(version.clone()).or_default();
@@ -1107,6 +1133,9 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
                 if let Some(java) = java {
                     validate_java_path(&java)?;
                     entry.java_path = java.display().to_string();
+                }
+                if let Some(memory) = memory {
+                    entry.memory_mb = memory;
                 }
             }
             let path = config.save()?;
@@ -1126,6 +1155,26 @@ fn run_config(action: ConfigAction) -> Result<(), CliError> {
 fn configured_java(value: &str) -> Option<PathBuf> {
     let value = value.trim();
     (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
+fn validate_memory(memory: Option<u32>) -> Result<(), CliError> {
+    let Some(memory) = memory.filter(|value| *value > config::MAX_MEMORY_MB) else {
+        return Ok(());
+    };
+    let value = memory.to_string();
+    let max = config::MAX_MEMORY_MB.to_string();
+    Err(usage(
+        "cli.error.memory_range",
+        &[("value", value.as_str()), ("max", max.as_str())],
+    ))
+}
+
+fn memory_label(memory_mb: u32) -> String {
+    if memory_mb == 0 {
+        t("settings.memory_auto").to_owned()
+    } else {
+        format!("{memory_mb} MB")
+    }
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -1192,6 +1241,11 @@ fn print_dirs(config: &LauncherConfig) {
                 } else {
                     entry.java_path.trim().to_owned()
                 };
+                let memory = if entry.memory_mb == 0 {
+                    t("common.global_paren").to_owned()
+                } else {
+                    memory_label(entry.memory_mb)
+                };
                 println!(
                     "{}",
                     tf(
@@ -1200,6 +1254,7 @@ fn print_dirs(config: &LauncherConfig) {
                             ("instance", id.as_str()),
                             ("isolate", yes_no(entry.isolate)),
                             ("java", java.as_str()),
+                            ("memory", memory.as_str()),
                         ],
                     )
                 );

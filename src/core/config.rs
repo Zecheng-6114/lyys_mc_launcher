@@ -11,6 +11,8 @@ const DATA_DIR_ENV: &str = "LYYS_DATA_DIR";
 const DATA_DIR_NAME: &str = ".lyysml";
 /// 没有配置任何目录时使用的默认 Minecraft 目录（相对于启动器工作目录）。
 pub const DEFAULT_MINECRAFT_DIR: &str = ".minecraft";
+/// 内存分配上限（MiB），GUI 与 CLI 共用。
+pub const MAX_MEMORY_MB: u32 = 65536;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -31,6 +33,9 @@ pub struct InstanceConfig {
     /// Empty means the global Java path is used.
     #[serde(default)]
     pub java_path: String,
+    /// Maximum Java heap in MiB; zero means the global value is used.
+    #[serde(default)]
+    pub memory_mb: u32,
 }
 
 impl Default for InstanceConfig {
@@ -39,6 +44,7 @@ impl Default for InstanceConfig {
             use_global: true,
             isolate: false,
             java_path: String::new(),
+            memory_mb: 0,
         }
     }
 }
@@ -74,6 +80,9 @@ pub struct LauncherConfig {
     pub java_versions: Vec<String>,
     #[serde(default)]
     pub isolate: bool,
+    /// Maximum Java heap in MiB; zero leaves the JVM default.
+    #[serde(default)]
+    pub memory_mb: u32,
     /// Language code (`en_us`, `zh_cn`, `zh_tw`, `ja_jp`); empty means auto-detect.
     #[serde(default)]
     pub language: String,
@@ -298,6 +307,22 @@ impl LauncherConfig {
             .unwrap_or("");
         if configured.is_empty() {
             self.java_path.trim()
+        } else {
+            configured
+        }
+    }
+
+    /// Maximum Java heap in MiB that applies to `instance` in the active
+    /// directory; zero means the JVM default.
+    pub fn effective_memory(&self, instance: &str) -> u32 {
+        let configured = self
+            .active_dir()
+            .and_then(|dir| dir.instances.get(instance))
+            .filter(|config| !config.use_global)
+            .map(|config| config.memory_mb)
+            .unwrap_or(0);
+        if configured == 0 {
+            self.memory_mb
         } else {
             configured
         }

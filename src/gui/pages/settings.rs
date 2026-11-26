@@ -49,7 +49,7 @@ impl App {
             });
     }
 
-    /// 全局 Java 与版本隔离设置。
+    /// 全局 Java、内存与版本隔离设置。
     fn settings_global_group(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.label(egui::RichText::new(t("settings.global")).strong());
@@ -89,6 +89,24 @@ impl App {
             if isolate_changed {
                 self.save_config();
             }
+            ui.horizontal(|ui| {
+                ui.label(t("settings.memory"));
+                let changed = ui
+                    .add(
+                        egui::DragValue::new(&mut self.memory_mb)
+                            .range(0..=config::MAX_MEMORY_MB)
+                            .speed(64)
+                            .suffix(" MB"),
+                    )
+                    .changed();
+                // 内存分配立即应用到内存中的配置，未点“保存配置”前也能按新值启动
+                if changed {
+                    self.config.memory_mb = self.memory_mb;
+                }
+                if self.memory_mb == 0 {
+                    ui.label(egui::RichText::new(t("settings.memory_auto")).weak().small());
+                }
+            });
         });
     }
 
@@ -286,6 +304,7 @@ impl App {
                     // 取消继承后从全局值起步，方便在此基础上修改
                     isolate: global_isolate,
                     java_path: String::new(),
+                    memory_mb: 0,
                 });
                 ui.checkbox(&mut entry.isolate, t("settings.isolate"));
                 ui.horizontal(|ui| {
@@ -295,6 +314,22 @@ impl App {
                             .id_salt(("instance_java", id.as_str()))
                             .hint_text(t("settings.inherit_global")),
                     );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t("settings.memory"));
+                    ui.add(
+                        egui::DragValue::new(&mut entry.memory_mb)
+                            .range(0..=config::MAX_MEMORY_MB)
+                            .speed(64)
+                            .suffix(" MB"),
+                    );
+                    if entry.memory_mb == 0 {
+                        ui.label(
+                            egui::RichText::new(t("settings.inherit_global"))
+                                .weak()
+                                .small(),
+                        );
+                    }
                 });
                 let java_path = entry.java_path.trim();
                 if !java_path.is_empty() && !std::path::Path::new(java_path).is_file() {

@@ -249,6 +249,8 @@ pub(crate) struct App {
     pub(crate) installed_error: Option<String>,
     pub(crate) launching: bool,
     pub(crate) isolate: bool,
+    /// 全局内存分配（MiB），0 表示交给 JVM 决定。
+    pub(crate) memory_mb: u32,
     // 持久化配置
     pub(crate) config: LauncherConfig,
     pub(crate) config_status: Option<String>,
@@ -343,6 +345,7 @@ impl App {
             installed_error: None,
             launching: false,
             isolate: config.isolate,
+            memory_mb: config.memory_mb,
             config,
             config_status,
             mod_query: String::new(),
@@ -494,6 +497,12 @@ impl App {
         (!path.is_empty()).then(|| PathBuf::from(path))
     }
 
+    /// Memory (MiB) for `instance`: its own config, else the global one;
+    /// zero means the JVM default.
+    pub(crate) fn effective_memory(&self, instance: &str) -> u32 {
+        self.config.effective_memory(instance)
+    }
+
     /// Java executables the launcher knows about: the saved list plus this scan.
     pub(crate) fn java_candidates(&self) -> Vec<String> {
         let mut candidates = self.config.java_versions.clone();
@@ -538,6 +547,7 @@ impl App {
         self.config.java_path = self.java_path.trim().to_owned();
         self.config.java_versions = self.java_candidates();
         self.config.isolate = self.isolate;
+        self.config.memory_mb = self.memory_mb;
         self.config.language = i18n::current().code().to_owned();
         match self.config.save() {
             Ok(path) => {

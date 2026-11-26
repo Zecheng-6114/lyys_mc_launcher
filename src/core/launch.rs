@@ -72,6 +72,8 @@ pub struct LaunchRequest<'a> {
     pub java_candidates: &'a [String],
     pub game_dir: Option<&'a Path>,
     pub isolated: bool,
+    /// Maximum Java heap in MiB; zero leaves the JVM default.
+    pub memory_mb: u32,
 }
 
 pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
@@ -122,9 +124,19 @@ pub fn launch(request: LaunchRequest<'_>) -> Result<Child, LaunchError> {
         ..Default::default()
     };
     let command = launcher.build_launch_command_from_version(&version, options)?;
+    let mut args = command.args;
+    if request.memory_mb > 0 {
+        // JVM 参数必须位于主类之前；放在版本自带参数之后可以覆盖其中的 -Xmx
+        let index = version
+            .main_class
+            .as_deref()
+            .and_then(|main_class| args.iter().position(|arg| arg.as_str() == main_class))
+            .unwrap_or(0);
+        args.insert(index, format!("-Xmx{}M", request.memory_mb));
+    }
     let mut child = Command::new(&command.executable);
     child
-        .args(&command.args)
+        .args(&args)
         .current_dir(&command.working_dir)
         .envs(command.env);
     apply_display_environment(&mut child);
