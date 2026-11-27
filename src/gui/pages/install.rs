@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use eframe::egui;
 
 use crate::core::i18n::{t, tf};
-use crate::core::install::{self, InstallProgress};
-use crate::core::logging;
-use crate::gui::app::{App, InstallSection, LoaderChoice, Message, Task};
+use crate::core::install;
+use crate::core::tasks::{InstallRequest, InstallTaskStatus};
+use crate::gui::app::{App, InstallSection, LoaderChoice, Message};
 
 impl App {
     /// 安装页入口：在「安装实例」与「安装内容」两个区之间切换。
@@ -162,31 +162,11 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.installing, egui::Button::new(t("common.install")))
-                        .clicked()
-                    {
-                        self.start_install(ui.ctx());
-                    }
-                    if self.installing {
-                        ui.add(egui::widgets::Spinner::new().size(14.0));
+                    if ui.button(t("common.install")).clicked() {
+                        self.start_install();
                     }
                 });
-                if let Some(progress) = &self.install_progress {
-                    ui.add_space(6.0);
-                    let downloaded = progress.downloaded.to_string();
-                    let skipped = progress.skipped.to_string();
-                    ui.monospace(tf(
-                        "install.files_summary",
-                        &[
-                            ("downloaded", downloaded.as_str()),
-                            ("skipped", skipped.as_str()),
-                        ],
-                    ));
-                    if let Some(current) = &progress.current {
-                        ui.monospace(tf("install.current", &[("name", current.as_str())]));
-                    }
-                }
+                self.install_tasks_panel(ui);
             });
     }
 
@@ -241,87 +221,88 @@ impl App {
         self.reload_loader_versions(ctx);
     }
 
-    pub(crate) fn start_install(&mut self, ctx: &egui::Context) {
+    pub(crate) fn start_install(&mut self) {
         let version = self.install_version.trim().to_owned();
         if version.is_empty() {
             self.log.push(t("install.need_version").to_owned());
             return;
         }
-        self.installing = true;
-        self.install_progress = Some(InstallProgress {
-            downloaded: 0,
-            skipped: 0,
-            current: None,
-        });
-        let dir = self.minecraft_dir();
+        let loader_version = self.install_loader_version.trim().to_owned();
         let java = if self.java_path.trim().is_empty() {
             PathBuf::from("java")
         } else {
             PathBuf::from(self.java_path.trim())
         };
-        let loader_name = self.install_loader.label();
-        let loader = self.install_loader.to_spec(&self.install_loader_version);
-        let mirror = self.config.download_mirror.trim().to_owned();
-        let tx = self.tx.clone();
-        let progress_tx = tx.clone();
-        let ctx = ctx.clone();
-        self.handle.spawn_blocking(move || {
-            let mut reporter = |progress: InstallProgress| {
-                let _ = progress_tx.send(Message::Progress(progress));
-                ctx.request_repaint();
-            };
-            let line = match loader {
-                Some(loader) => {
-                    match install::install_loader_with_reporter(
-                        &dir,
-                        &version,
-                        loader,
-                        &java,
-                        &mirror,
-                        &mut reporter,
-                    ) {
-                        Ok(result) => {
-                            logging::info(&format!(
-                                "installed {} {} into {}",
-                                loader_name,
-                                result.version_id,
-                                dir.display()
-                            ));
-                            tf(
-                                "install.installed",
-                                &[
-                                    ("version", loader_name),
-                                    ("loader", result.version_id.as_str()),
-                                ],
-                            )
-                        }
-                        Err(error) => {
-                            let error = error.to_string();
-                            logging::error("install", &error);
-                            tf("error.install_failed", &[("error", error.as_str())])
-                        }
+        let request = InstallRequest {
+            loader: self.install_loader.to_spec(&loader_version),
+            loader_label: self.install_loader.label(),
+            version,
+            loader_version,
+            dir: self.minecraft_dir(),
+            java,
+            mirror: self.config.download_mirror.trim().to_owned(),
+        };
+        if self.tasks.submit(request) {
+            self.tasks.dispatch();
+        } else {
+            self.log.push(t("install.task.duplicate").to_owned());
+        }
+    }
+
+    pub(crate) fn install_tasks_panel(&mut self, ui: &mut egui::Ui) {
+        if self.tasks.tasks().is_empty() {
+            return;
+        }
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(t("install.tasks.title")).strong());
+        let mut removed = None;
+        for task in self.tasks.tasks() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    if task.status == InstallTaskStatus::Running {
+                        ui.add(egui::widgets::Spinner::new().size(14.0));
                     }
-                }
-                None => match install::install_with_reporter(&dir, &version, &mirror, &mut reporter)
-                {
-                    Ok(_) => {
-                        logging::info(&format!(
-                            "installed {version} into {}",
-                            dir.display()
+                    let title = if task.request.loader.is_none() {
+                        task.request.version.clone()
+                    } else {
+                        format!("{} {}", task.request.version, task.request.loader_label)
+                    };
+                    ui.label(egui::RichText::new(title).strong());
+                    ui.label(
+                        egui::RichText::new(install_task_status_label(task.status))
+                            .weak(),
+                    );
+                    if let Some(progress) = &task.progress {
+                        let downloaded = progress.downloaded.to_string();
+                        let skipped = progress.skipped.to_string();
+                        ui.monospace(tf(
+                            "install.files_summary",
+                            &[
+                                ("downloaded", downloaded.as_str()),
+                                ("skipped", skipped.as_str()),
+                            ],
                         ));
-                        tf("install.installed_only", &[("version", version.as_str())])
+                        if let Some(current) = &progress.current {
+                            ui.monospace(tf("install.current", &[("name", current.as_str())]));
+                        }
                     }
-                    Err(error) => {
-                        let error = error.to_string();
-                        logging::error("install", &error);
-                        tf("error.install_failed", &[("error", error.as_str())])
+                    if matches!(
+                        task.status,
+                        InstallTaskStatus::Done | InstallTaskStatus::Failed
+                    ) && ui.small_button(t("common.remove")).clicked()
+                    {
+                        removed = Some(task.id);
                     }
-                },
-            };
-            let _ = tx.send(Message::Log(line));
-            let _ = tx.send(Message::TaskDone(Task::Install));
-            ctx.request_repaint();
-        });
+                });
+                if let Some(message) = &task.message {
+                    ui.label(egui::RichText::new(message).small());
+                }
+            });
+            ui.add_space(2.0);
+        }
+        if let Some(id) = removed {
+            self.tasks.remove(id);
+        }
     }
 }
 
@@ -333,5 +314,14 @@ fn version_kind_label(kind: &str) -> &'static str {
         "old_beta" => t("install.kind.old_beta"),
         "old_alpha" => t("install.kind.old_alpha"),
         _ => t("install.kind.other"),
+    }
+}
+
+fn install_task_status_label(status: InstallTaskStatus) -> &'static str {
+    match status {
+        InstallTaskStatus::Queued => t("install.task.queued"),
+        InstallTaskStatus::Running => t("install.task.running"),
+        InstallTaskStatus::Done => t("install.task.done"),
+        InstallTaskStatus::Failed => t("install.task.failed"),
     }
 }

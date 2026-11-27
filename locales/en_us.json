@@ -184,6 +184,12 @@
   "install.section.content": "Install resources",
   "install.show_all": "Show snapshots and old versions",
   "install.summary": "downloaded {downloaded} files, skipped {skipped}",
+  "install.task.done": "done",
+  "install.task.duplicate": "this version is already in the task queue",
+  "install.task.failed": "failed",
+  "install.task.queued": "queued",
+  "install.task.running": "installing",
+  "install.tasks.title": "Install tasks",
   "install.version": "Version:",
   "install.versions_loading": "loading versions...",
 

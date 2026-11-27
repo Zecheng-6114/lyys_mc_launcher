@@ -12,12 +12,13 @@ use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
 use crate::core::auth::{AccountSession, Auth, AuthError, SessionState};
 use crate::core::config::{DEFAULT_MINECRAFT_DIR, LauncherConfig};
 use crate::core::i18n::{self, Language, t, tf};
-use crate::core::install::{self, AvailableVersion, InstallProgress};
+use crate::core::install::{self, AvailableVersion};
 use crate::core::java::{self, JavaRuntime};
 use crate::core::logging;
 use crate::core::modpack;
 use crate::core::modrinth::{InstallOutcome, ModSearchHit, ModSearchResult, ProjectType};
 use crate::core::region::Region;
+use crate::core::tasks::{TaskEvent, TaskManager};
 
 use super::background::contour::paint_contour_background;
 
@@ -27,14 +28,13 @@ pub(crate) const MOD_MANIFEST_FILE: &str = ".lyys_mods.json";
 #[derive(Clone, Copy)]
 pub(crate) enum Task {
     Login,
-    Install,
     Launch,
 }
 
 pub(crate) enum Message {
     Log(String),
     TaskDone(Task),
-    Progress(InstallProgress),
+    TaskEvent(TaskEvent),
     Versions(Result<Vec<AvailableVersion>, String>),
     LoaderVersions {
         key: (LoaderChoice, String),
@@ -172,7 +172,7 @@ pub fn run() -> Result<(), String> {
         options,
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(App::new(auth, handle)))
+            Ok(Box::new(App::new(auth, handle, cc.egui_ctx.clone())))
         }),
     )
     .map_err(|error| {
@@ -250,8 +250,7 @@ pub(crate) struct App {
     pub(crate) versions_error: Option<String>,
     pub(crate) versions_requested: bool,
     pub(crate) show_all_versions: bool,
-    pub(crate) install_progress: Option<InstallProgress>,
-    pub(crate) installing: bool,
+    pub(crate) tasks: TaskManager,
     // 启动实例
     pub(crate) launch_version: String,
     pub(crate) installed: Vec<InstalledInstance>,
@@ -298,8 +297,14 @@ pub(crate) struct App {
 }
 
 impl App {
-    fn new(auth: Auth, handle: Handle) -> Self {
+    fn new(auth: Auth, handle: Handle, egui_ctx: egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
+        let task_tx = tx.clone();
+        let task_ctx = egui_ctx;
+        let tasks = TaskManager::new(move |event| {
+            let _ = task_tx.send(Message::TaskEvent(event));
+            task_ctx.request_repaint();
+        });
         let (mut config, load_error) = match LauncherConfig::load() {
             Ok(config) => (config, None),
             Err(error) => (LauncherConfig::default(), Some(error)),
@@ -350,8 +355,7 @@ impl App {
             versions_error: None,
             versions_requested: false,
             show_all_versions: false,
-            install_progress: None,
-            installing: false,
+            tasks,
             launch_version: String::new(),
             installed: Vec::new(),
             installed_dir: String::new(),
@@ -795,13 +799,19 @@ impl eframe::App for App {
                         self.logging_in = false;
                         self.reload_accounts();
                     }
-                    Task::Install => {
-                        self.installing = false;
-                        self.scan_installed();
-                    }
                     Task::Launch => self.launching = false,
                 },
-                Message::Progress(progress) => self.install_progress = Some(progress),
+                Message::TaskEvent(event) => match event {
+                    TaskEvent::Progress { id, progress } => {
+                        self.tasks.update_progress(id, progress);
+                    }
+                    TaskEvent::Done { id, ok, message } => {
+                        self.tasks.finish(id, ok, message.clone());
+                        self.log.push(message);
+                        self.scan_installed();
+                        self.tasks.dispatch();
+                    }
+                },
                 Message::ModpackProgress(line) => self.modpack_progress = Some(line),
                 Message::ModProgress(line) => self.mod_progress = Some(line),
                 Message::ModpackDone { dir, result } => {

@@ -184,6 +184,12 @@
   "install.section.content": "リソースをインストール",
   "install.show_all": "スナップショットと旧バージョンを表示",
   "install.summary": "{downloaded} 個のファイルをダウンロード、{skipped} 個をスキップ",
+  "install.task.done": "完了",
+  "install.task.duplicate": "このバージョンはすでにタスクキューに登録されています",
+  "install.task.failed": "失敗",
+  "install.task.queued": "待機中",
+  "install.task.running": "インストール中",
+  "install.tasks.title": "インストールタスク",
   "install.version": "バージョン:",
   "install.versions_loading": "バージョンを読み込み中...",
 

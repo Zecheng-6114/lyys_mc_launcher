@@ -184,6 +184,12 @@
   "install.section.content": "安装资源",
   "install.show_all": "显示快照和旧版本",
   "install.summary": "已下载 {downloaded} 个文件，跳过 {skipped} 个",
+  "install.task.done": "已完成",
+  "install.task.duplicate": "该版本已在任务队列中",
+  "install.task.failed": "失败",
+  "install.task.queued": "排队中",
+  "install.task.running": "安装中",
+  "install.tasks.title": "安装任务",
   "install.version": "版本：",
   "install.versions_loading": "正在加载版本...",
 

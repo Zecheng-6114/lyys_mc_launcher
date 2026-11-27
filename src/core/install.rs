@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::Path;
+use std::collections::{BTreeMap, HashSet};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use mc_launcher_core::compatibility::{CompatibilityPolicy, apply_compatibility};
@@ -19,10 +20,11 @@ use mc_launcher_core::install::InstallResult;
 use mc_launcher_core::launcher::Launcher;
 use mc_launcher_core::loader::common::{LoaderSpec, LoaderVersion};
 use mc_launcher_core::loader::{LoaderKind, fabric, forge, neoforge, quilt};
-use mc_launcher_core::net::download::{DownloadPlan, DownloadTask, execute_plan};
+use mc_launcher_core::io::hash::sha1_file;
+use mc_launcher_core::net::download::{Checksum, DownloadPlan, DownloadTask, should_skip_existing};
 use mc_launcher_core::net::http;
 use mc_launcher_core::platform::Platform;
-use mc_launcher_core::progress::ProgressEvent;
+use mc_launcher_core::progress::{ProgressEvent, SkipReason};
 use serde::{Deserialize, Serialize};
 
 use super::i18n::tf;
@@ -38,6 +40,100 @@ const NEOFORGE_METADATA_URL: &str =
     "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
 const VERSIONS_CACHE: &str = "versions.json";
 const LOADER_VERSIONS_CACHE: &str = "loader_versions.json";
+
+/// 同一目录下的并发任务会下载重叠的资产与库文件，而依赖库直接把数据写到
+/// 目标路径，因此按路径加互斥锁，避免两个任务同时写同一个文件导致损坏。
+static PATH_LOCKS: OnceLock<(Mutex<HashSet<PathBuf>>, Condvar)> = OnceLock::new();
+
+/// 官方安装器会改写 launcher_profiles.json 等共享档案，同一时刻只允许运行一个。
+static LOADER_INSTALLER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct PathGuard {
+    path: PathBuf,
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        let (held, cond) = PATH_LOCKS.get_or_init(Default::default);
+        let mut guard = held.lock().unwrap_or_else(|error| error.into_inner());
+        guard.remove(&self.path);
+        cond.notify_all();
+    }
+}
+
+fn path_lock(path: &Path) -> PathGuard {
+    let (held, cond) = PATH_LOCKS.get_or_init(Default::default);
+    let mut guard = held.lock().unwrap_or_else(|error| error.into_inner());
+    while !guard.insert(path.to_path_buf()) {
+        guard = cond.wait(guard).unwrap_or_else(|error| error.into_inner());
+    }
+    PathGuard {
+        path: path.to_path_buf(),
+    }
+}
+
+fn loader_installer_lock() -> std::sync::MutexGuard<'static, ()> {
+    LOADER_INSTALLER_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+/// 与 mc_launcher_core 的 `execute_plan` 逻辑一致，但每个目标文件先取路径锁，
+/// 使多个任务可以安全地并发安装到同一个目录。
+fn execute_plan_locked(
+    plan: &DownloadPlan,
+    reporter: &mut dyn FnMut(ProgressEvent),
+) -> Result<(), mc_launcher_core::LauncherError> {
+    let client = http::client()?;
+    for task in &plan.tasks {
+        let result = {
+            let _guard = path_lock(&task.destination);
+            if should_skip_existing(task)? {
+                reporter(ProgressEvent::TaskSkipped {
+                    label: task.label.clone(),
+                    reason: if task.checksum.is_some() {
+                        SkipReason::ChecksumMatched
+                    } else {
+                        SkipReason::FileExistsWithoutChecksum
+                    },
+                });
+                Ok(())
+            } else {
+                reporter(ProgressEvent::TaskStarted {
+                    label: task.label.clone(),
+                    path: task.destination.clone(),
+                });
+                let download = (|| -> Result<(), mc_launcher_core::LauncherError> {
+                    if let Some(parent) = task.destination.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut response = client.get(&task.url).send()?.error_for_status()?;
+                    let mut file = std::fs::File::create(&task.destination)?;
+                    io::copy(&mut response, &mut file)?;
+                    if let Some(Checksum::Sha1(expected)) = &task.checksum {
+                        let actual = sha1_file(&task.destination)?;
+                        if actual != *expected {
+                            return Err(mc_launcher_core::LauncherError::ChecksumMismatch {
+                                path: task.destination.clone(),
+                                expected: expected.clone(),
+                                actual,
+                            });
+                        }
+                    }
+                    Ok(())
+                })();
+                download.map(|_| {
+                    reporter(ProgressEvent::TaskFinished {
+                        label: task.label.clone(),
+                    });
+                })
+            }
+        };
+        result?;
+    }
+    Ok(())
+}
 
 /// 官方下载域名到镜像路径的对应关系，遵循 BMCLAPI 的路径约定。
 const MIRROR_MAPPINGS: &[(&str, &str)] = &[
@@ -304,6 +400,10 @@ fn ensure_launcher_profiles(minecraft_dir: &Path) {
     if path.is_file() {
         return;
     }
+    let _guard = path_lock(&path);
+    if path.is_file() {
+        return;
+    }
     let _ = std::fs::create_dir_all(minecraft_dir);
     let _ = std::fs::write(path, br#"{"profiles":{}}"#);
 }
@@ -446,7 +546,7 @@ fn install_with_installer(
         .join("versions")
         .join(".installers")
         .join(format!("{loader_name}-{loader_version}-installer.jar"));
-    execute_plan(
+    execute_plan_locked(
         &DownloadPlan {
             tasks: vec![DownloadTask {
                 url: installer_url,
@@ -458,15 +558,6 @@ fn install_with_installer(
         &mut reporter_bridge,
     )?;
 
-    let result = run_loader_installer(&InstallerInvocation {
-        loader: kind,
-        java_executable: java_executable.to_path_buf(),
-        installer_path: installer_path.clone(),
-        minecraft_dir: minecraft_dir.to_path_buf(),
-    });
-    archive_installer_log(&installer_path);
-    result?;
-
     let version_id = match kind {
         LoaderKind::Forge => forge::forge_installed_version_id(&loader_version)?,
         LoaderKind::NeoForge => {
@@ -474,8 +565,24 @@ fn install_with_installer(
         }
         _ => unreachable!(),
     };
-    let merged = launcher.load_version(&version_id)?;
-    install_version_files(&merged, minecraft_dir, mirror, &mut reporter_bridge)?;
+    let result = {
+        let _installer_guard = loader_installer_lock();
+        let result = run_loader_installer(&InstallerInvocation {
+            loader: kind,
+            java_executable: java_executable.to_path_buf(),
+            installer_path: installer_path.clone(),
+            minecraft_dir: minecraft_dir.to_path_buf(),
+        });
+        archive_installer_log(&installer_path);
+        result
+    };
+    result?;
+
+    {
+        let _guard = path_lock(&minecraft_dir.join("versions").join(&version_id));
+        let merged = launcher.load_version(&version_id)?;
+        install_version_files(&merged, minecraft_dir, mirror, &mut reporter_bridge)?;
+    }
     Ok(InstallResult { version_id })
 }
 
@@ -627,6 +734,8 @@ fn install_vanilla<F>(
 where
     F: FnMut(ProgressEvent),
 {
+    // 同一版本可能被两个任务同时安装，整个阶段按版本目录串行。
+    let _guard = path_lock(&minecraft_dir.join("versions").join(version_id));
     let version = fetch_version_json(version_id, mirror)?;
     write_version_json(minecraft_dir, &version)?;
     install_version_files(&version, minecraft_dir, mirror, reporter)
@@ -703,6 +812,7 @@ where
                 context: profile_name.to_owned(),
                 field: "id".to_owned(),
             })?;
+    let _guard = path_lock(&minecraft_dir.join("versions").join(&version_id));
     write_loader_profile(minecraft_dir, &profile)?;
     let merged = Launcher::new(minecraft_dir).load_version(&version_id)?;
     install_version_files(&merged, minecraft_dir, mirror, reporter)?;
@@ -736,18 +846,18 @@ where
         platform,
         CompatibilityPolicy::Disabled,
     )?;
-    execute_plan(&mirrored_plan(plan, mirror), reporter)?;
+    execute_plan_locked(&mirrored_plan(plan, mirror), reporter)?;
 
     let index_plan = DownloadPlan {
         tasks: plan_asset_index_download(version, minecraft_dir)?,
     };
-    execute_plan(&mirrored_plan(index_plan, mirror), reporter)?;
+    execute_plan_locked(&mirrored_plan(index_plan, mirror), reporter)?;
 
     if let Some(asset_index) = &version.asset_index {
         let index: AssetIndexJson =
             serde_json::from_slice(&std::fs::read(asset_index_path(minecraft_dir, &asset_index.id))?)?;
         let object_plan = plan_asset_object_downloads_from_index(&index, minecraft_dir);
-        execute_plan(&mirrored_plan(object_plan, mirror), reporter)?;
+        execute_plan_locked(&mirrored_plan(object_plan, mirror), reporter)?;
     }
 
     extract_natives_for_platform(&version.libraries, minecraft_dir, version_id, platform)?;

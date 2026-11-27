@@ -8,3 +8,4 @@ pub mod logging;
 pub mod modpack;
 pub mod modrinth;
 pub mod region;
+pub mod tasks;
