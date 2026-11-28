@@ -180,6 +180,8 @@
   "install.loader": "加载器：",
   "install.loader_none": "没有找到兼容的加载器版本",
   "install.loader_version": "加载器版本：",
+  "install.name": "名称：",
+  "install.name_hint": "可选",
   "install.need_version": "请先填写版本",
   "install.section.content": "安装资源",
   "install.show_all": "显示快照和旧版本",

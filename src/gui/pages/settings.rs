@@ -319,6 +319,7 @@ impl App {
                     isolate: global_isolate,
                     java_path: String::new(),
                     memory_mb: 0,
+                    name: String::new(),
                 });
                 ui.checkbox(&mut entry.isolate, t("settings.isolate"));
                 ui.horizontal(|ui| {

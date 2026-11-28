@@ -60,6 +60,14 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
+                    ui.label(t("install.name"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.install_name)
+                            .id_salt("install_name")
+                            .hint_text(t("install.name_hint")),
+                    );
+                });
+                ui.horizontal(|ui| {
                     ui.checkbox(&mut self.show_all_versions, t("install.show_all"));
                     if self.versions_loading {
                         ui.add(egui::widgets::Spinner::new().size(14.0));
@@ -237,6 +245,7 @@ impl App {
             loader: self.install_loader.to_spec(&loader_version),
             loader_label: self.install_loader.label(),
             version,
+            name: self.install_name.trim().to_owned(),
             loader_version,
             dir: self.minecraft_dir(),
             java,
@@ -262,10 +271,16 @@ impl App {
                     if task.status == InstallTaskStatus::Running {
                         ui.add(egui::widgets::Spinner::new().size(14.0));
                     }
-                    let title = if task.request.loader.is_none() {
+                    let base = if task.request.loader.is_none() {
                         task.request.version.clone()
                     } else {
                         format!("{} {}", task.request.version, task.request.loader_label)
+                    };
+                    let name = task.request.name.trim();
+                    let title = if name.is_empty() {
+                        base
+                    } else {
+                        format!("{name}  ({base})")
                     };
                     ui.label(egui::RichText::new(title).strong());
                     ui.label(

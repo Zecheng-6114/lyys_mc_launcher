@@ -184,6 +184,8 @@ pub fn run() -> Result<(), String> {
 #[derive(Clone)]
 pub(crate) struct InstalledInstance {
     pub(crate) id: String,
+    /// 安装时记录的显示名；为空时界面显示版本 id。
+    pub(crate) name: String,
     pub(crate) loader: Option<&'static str>,
     pub(crate) game_version: Option<String>,
 }
@@ -231,6 +233,8 @@ pub(crate) struct App {
     pub(crate) install_section: InstallSection,
     // 安装实例
     pub(crate) install_version: String,
+    /// 安装时可选填写的实例显示名。
+    pub(crate) install_name: String,
     /// 设置页里正在输入的待添加目录。
     pub(crate) new_dir_path: String,
     /// 是否已有文件夹选择框在等待结果。
@@ -339,6 +343,7 @@ impl App {
             page: Page::Launch,
             install_section: InstallSection::Instance,
             install_version: String::new(),
+            install_name: String::new(),
             new_dir_path: String::new(),
             dir_picking: false,
             install_loader: LoaderChoice::Vanilla,
@@ -465,8 +470,10 @@ impl App {
                     .into_iter()
                     .map(|id| {
                         let (loader, game_version) = inspect_instance(&dir, &id);
+                        let name = self.config.instance_name(&id).to_owned();
                         InstalledInstance {
                             id,
+                            name,
                             loader,
                             game_version,
                         }
@@ -805,9 +812,31 @@ impl eframe::App for App {
                     TaskEvent::Progress { id, progress } => {
                         self.tasks.update_progress(id, progress);
                     }
-                    TaskEvent::Done { id, ok, message } => {
+                    TaskEvent::Done {
+                        id,
+                        ok,
+                        message,
+                        version_id,
+                    } => {
                         self.tasks.finish(id, ok, message.clone());
                         self.log.push(message);
+                        // 配置写回放回界面线程，避免后台安装线程覆盖尚未保存的设置
+                        if let (true, Some(version)) = (ok, version_id) {
+                            let named = self
+                                .tasks
+                                .tasks()
+                                .iter()
+                                .find(|task| task.id == id)
+                                .map(|task| {
+                                    (task.request.dir.clone(), task.request.name.trim().to_owned())
+                                })
+                                .filter(|(_, name)| !name.is_empty());
+                            if let Some((dir, name)) = named {
+                                self.config.register_dir(&dir.display().to_string());
+                                self.config.set_instance_name(&dir, &version, &name);
+                                self.persist_config();
+                            }
+                        }
                         self.scan_installed();
                         self.tasks.dispatch();
                     }

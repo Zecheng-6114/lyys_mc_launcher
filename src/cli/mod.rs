@@ -192,6 +192,9 @@ struct InstallArgs {
     /// Exact loader version; defaults to the latest compatible one.
     #[arg(long, requires = "loader")]
     loader_version: Option<String>,
+    /// Display name recorded for the installed instance.
+    #[arg(long)]
+    name: Option<String>,
     /// Java executable used by the Forge/NeoForge installer (defaults to the configured one).
     #[arg(long)]
     java: Option<PathBuf>,
@@ -522,7 +525,7 @@ fn resolve_account(auth: &Auth, query: &str) -> Result<AccountSession, CliError>
 }
 
 async fn run_install(args: InstallArgs) -> Result<(), CliError> {
-    let config = LauncherConfig::load()?;
+    let mut config = LauncherConfig::load()?;
     let minecraft_dir = resolve_minecraft_dir(args.minecraft_dir, &config)?;
     let version_id = args.version;
     let java = args
@@ -538,7 +541,7 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
     let install_dir = minecraft_dir.clone();
     let install_version = version_id.clone();
     let install_mirror = config.download_mirror.trim().to_owned();
-    tokio::task::spawn_blocking(move || match loader {
+    let result = tokio::task::spawn_blocking(move || match loader {
         Some(loader) => {
             let mut printed = false;
             let mut reporter = |progress: install::InstallProgress| {
@@ -571,6 +574,17 @@ async fn run_install(args: InstallArgs) -> Result<(), CliError> {
     })
     .await
     .map_err(|error| CliError::Task(error.to_string()))??;
+    if let Some(name) = args
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        // 显式指定的目录可能尚未登记，先登记再写名字，否则命名没有归属
+        config.register_dir(&minecraft_dir.display().to_string());
+        config.set_instance_name(&minecraft_dir, &result.version_id, name);
+        config.save()?;
+    }
     logging::info(&format!(
         "installed version {version_id} into {}",
         minecraft_dir.display()
@@ -681,7 +695,12 @@ fn run_list() -> Result<(), CliError> {
     }
     println!("{}", tf("cli.list.header", &[("dir", dir.as_str())]));
     for version in &versions {
-        println!("  {version}");
+        let name = config.instance_name(version);
+        if name.is_empty() {
+            println!("  {version}");
+        } else {
+            println!("  {name}  ({version})");
+        }
     }
     Ok(())
 }

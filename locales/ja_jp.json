@@ -180,6 +180,8 @@
   "install.loader": "ローダー:",
   "install.loader_none": "互換性のあるローダーバージョンが見つかりません",
   "install.loader_version": "ローダーバージョン:",
+  "install.name": "名前:",
+  "install.name_hint": "任意",
   "install.need_version": "先にバージョンを入力してください",
   "install.section.content": "リソースをインストール",
   "install.show_all": "スナップショットと旧バージョンを表示",

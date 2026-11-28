@@ -180,6 +180,8 @@
   "install.loader": "載入器：",
   "install.loader_none": "找不到相容的載入器版本",
   "install.loader_version": "載入器版本：",
+  "install.name": "名稱：",
+  "install.name_hint": "可選",
   "install.need_version": "請先填寫版本",
   "install.section.content": "安裝資源",
   "install.show_all": "顯示快照與舊版本",

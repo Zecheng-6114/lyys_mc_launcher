@@ -25,6 +25,8 @@ pub enum InstallTaskStatus {
 #[derive(Clone)]
 pub struct InstallRequest {
     pub version: String,
+    /// 用户为实例起的显示名，空串表示不命名。
+    pub name: String,
     pub loader: Option<LoaderSpec>,
     /// 加载器显示名，用于任务标题与结果文案。
     pub loader_label: &'static str,
@@ -47,7 +49,13 @@ pub struct InstallTask {
 /// 任务管理器向调用方上报的事件。
 pub enum TaskEvent {
     Progress { id: u64, progress: InstallProgress },
-    Done { id: u64, ok: bool, message: String },
+    Done {
+        id: u64,
+        ok: bool,
+        message: String,
+        /// 安装成功时实际写入的版本 id，调用方据此记录实例显示名。
+        version_id: Option<String>,
+    },
 }
 
 pub struct TaskManager {
@@ -110,8 +118,13 @@ impl TaskManager {
                 let mut reporter = |progress: InstallProgress| {
                     on_event(TaskEvent::Progress { id, progress });
                 };
-                let (ok, message) = run_task(&request, &mut reporter);
-                on_event(TaskEvent::Done { id, ok, message });
+                let (ok, message, version_id) = run_task(&request, &mut reporter);
+                on_event(TaskEvent::Done {
+                    id,
+                    ok,
+                    message,
+                    version_id,
+                });
             });
         }
     }
@@ -146,7 +159,10 @@ impl TaskManager {
     }
 }
 
-fn run_task(request: &InstallRequest, reporter: &mut dyn FnMut(InstallProgress)) -> (bool, String) {
+fn run_task(
+    request: &InstallRequest,
+    reporter: &mut dyn FnMut(InstallProgress),
+) -> (bool, String, Option<String>) {
     match &request.loader {
         Some(loader) => {
             match install::install_loader_with_reporter(
@@ -164,16 +180,14 @@ fn run_task(request: &InstallRequest, reporter: &mut dyn FnMut(InstallProgress))
                         result.version_id,
                         request.dir.display()
                     ));
-                    (
-                        true,
-                        tf(
-                            "install.installed",
-                            &[
-                                ("version", request.loader_label),
-                                ("loader", result.version_id.as_str()),
-                            ],
-                        ),
-                    )
+                    let message = tf(
+                        "install.installed",
+                        &[
+                            ("version", request.loader_label),
+                            ("loader", result.version_id.as_str()),
+                        ],
+                    );
+                    (true, message, Some(result.version_id))
                 }
                 Err(error) => {
                     let error = error.to_string();
@@ -181,6 +195,7 @@ fn run_task(request: &InstallRequest, reporter: &mut dyn FnMut(InstallProgress))
                     (
                         false,
                         tf("error.install_failed", &[("error", error.as_str())]),
+                        None,
                     )
                 }
             }
@@ -192,7 +207,7 @@ fn run_task(request: &InstallRequest, reporter: &mut dyn FnMut(InstallProgress))
                 &request.mirror,
                 reporter,
             ) {
-                Ok(_) => {
+                Ok(result) => {
                     logging::info(&format!(
                         "installed {} into {}",
                         request.version,
@@ -201,6 +216,7 @@ fn run_task(request: &InstallRequest, reporter: &mut dyn FnMut(InstallProgress))
                     (
                         true,
                         tf("install.installed_only", &[("version", request.version.as_str())]),
+                        Some(result.version_id),
                     )
                 }
                 Err(error) => {
@@ -209,6 +225,7 @@ fn run_task(request: &InstallRequest, reporter: &mut dyn FnMut(InstallProgress))
                     (
                         false,
                         tf("error.install_failed", &[("error", error.as_str())]),
+                        None,
                     )
                 }
             }

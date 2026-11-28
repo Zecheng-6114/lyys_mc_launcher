@@ -180,6 +180,8 @@
   "install.loader": "Loader:",
   "install.loader_none": "no compatible loader version found",
   "install.loader_version": "Loader version:",
+  "install.name": "Name:",
+  "install.name_hint": "optional",
   "install.need_version": "enter a version first",
   "install.section.content": "Install resources",
   "install.show_all": "Show snapshots and old versions",

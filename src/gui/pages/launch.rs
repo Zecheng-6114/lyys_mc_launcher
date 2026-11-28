@@ -34,9 +34,14 @@ impl App {
                         .max_height(160.0)
                         .show(ui, |ui| {
                             for instance in &self.installed {
+                                let display = if instance.name.is_empty() {
+                                    instance.id.clone()
+                                } else {
+                                    format!("{}  ({})", instance.name, instance.id)
+                                };
                                 let label = match instance.loader {
-                                    Some(tag) => format!("{}  · {tag}", instance.id),
-                                    None => instance.id.clone(),
+                                    Some(tag) => format!("{display}  · {tag}"),
+                                    None => display,
                                 };
                                 if ui
                                     .selectable_label(self.launch_version == instance.id, label)

@@ -36,6 +36,10 @@ pub struct InstanceConfig {
     /// Maximum Java heap in MiB; zero means the global value is used.
     #[serde(default)]
     pub memory_mb: u32,
+    /// 安装时用户起的显示名；为空时界面直接显示版本 id，
+    /// 与 `use_global` 无关，命名只是展示信息而非启动配置。
+    #[serde(default)]
+    pub name: String,
 }
 
 impl Default for InstanceConfig {
@@ -45,6 +49,7 @@ impl Default for InstanceConfig {
             isolate: false,
             java_path: String::new(),
             memory_mb: 0,
+            name: String::new(),
         }
     }
 }
@@ -287,6 +292,24 @@ impl LauncherConfig {
         let raw = path.to_string_lossy();
         let index = self.dir_index(raw.trim())?;
         Some(&mut self.minecraft_dirs[index].instances)
+    }
+
+    /// 当前目录下实例 `instance` 的显示名；未命名时返回空串。
+    pub fn instance_name(&self, instance: &str) -> &str {
+        self.active_dir()
+            .and_then(|dir| dir.instances.get(instance))
+            .map(|entry| entry.name.trim())
+            .unwrap_or("")
+    }
+
+    /// 为 `path` 目录下的实例记录显示名；目录未登记时返回 `false`。
+    pub fn set_instance_name(&mut self, path: &Path, version_id: &str, name: &str) -> bool {
+        let Some(instances) = self.dir_instances_mut(path) else {
+            return false;
+        };
+        let entry = instances.entry(version_id.to_owned()).or_default();
+        entry.name = name.trim().to_owned();
+        true
     }
 
     /// Version isolation that applies to `instance` in the active directory.
